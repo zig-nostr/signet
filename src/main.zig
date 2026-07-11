@@ -15,11 +15,19 @@ const keystore = @import("keystore.zig");
 const policy = @import("policy.zig");
 const approval = @import("approval.zig");
 const approval_http = @import("approval_http.zig");
+const onboarding = @import("onboarding.zig");
 
 const keys = nostr.keys;
 const nip46 = nostr.nip46;
 const nip49 = nostr.nip49;
 const hex = nostr.hex;
+
+// Turnkey defaults for GUI mode, so a freshly downloaded app works with zero
+// configuration; each is overridable via its environment variable. The key and
+// token files sit under $HOME; relays default to a public relay.
+const default_token_file = ".zig-nostr-signer.token";
+const default_key_file = ".zig-nostr-signer.key";
+const default_gui_relays = "wss://relay.damus.io";
 
 const usage =
     \\zig-nostr signer — headless NIP-46 remote signer (bunker)
@@ -53,69 +61,128 @@ pub fn main() !void {
     // `SIGNER_INIT` bootstraps an encrypted key file at rest, then exits.
     if (getEnv("SIGNER_INIT") != null) runInit(gpa);
 
-    const relays_env = getEnv("SIGNER_RELAYS") orelse
-        fail("set SIGNER_RELAYS to a comma-separated list of wss:// URLs");
     const conn_secret = getEnv("SIGNER_CONNECT_SECRET");
 
     // Authorization rules, parsed once and shared read-only across relay threads.
     const policy_config = buildPolicyConfig(gpa);
 
+    // GUI mode: when SIGNER_APPROVAL_HTTP is set, the daemon may boot WITHOUT a
+    // key. It stands up the loopback approval API first (reporting its key
+    // state), lets the connected GUI create or unlock the key over /setup and
+    // /unlock, and only then serves. The key is created/decrypted in the daemon;
+    // the GUI never receives it. See onboarding.zig + approval_http.zig.
+    if (getEnv("SIGNER_APPROVAL_HTTP")) |addr| {
+        runGuiMode(gpa, addr, conn_secret, &policy_config);
+    }
+
+    // Headless mode: the key must already be available (from an encrypted key
+    // file or the dev-only SIGNER_SECRET_KEY), and relays are required up front.
+    const relays_env = getEnv("SIGNER_RELAYS") orelse
+        fail("set SIGNER_RELAYS to a comma-separated list of wss:// URLs");
+    var relays: std.ArrayList([]const u8) = .empty;
+    parseRelays(gpa, &relays, relays_env);
+    if (relays.items.len == 0) fail("SIGNER_RELAYS contained no relay URLs");
+
     // Load the secret key once (decrypting the at-rest key file if configured).
     // The deliberately-expensive scrypt KDF runs here and only here; the relay
-    // threads below receive the already-derived 32-byte key, so no per-request
-    // or per-connection key derivation ever happens.
+    // threads receive the already-derived 32-byte key, so no per-request or
+    // per-connection key derivation ever happens.
     const secret_key = loadSecretKey(gpa);
+    runRelays(gpa, relays.items, secret_key, conn_secret, &policy_config, null);
+}
 
+/// GUI mode: stand up the approval API (key-less if there is no key yet), run
+/// first-run key onboarding over it, then serve with the resulting key. The
+/// broker and server live in this frame, which never returns (it tail-calls the
+/// forever-serving `runRelays`), so their addresses are stable for the process.
+fn runGuiMode(gpa: std.mem.Allocator, addr: []const u8, conn_secret: ?[]const u8, policy_config: *const policy.Config) noreturn {
+    const hp = parseHostPort(addr) orelse
+        fail("SIGNER_APPROVAL_HTTP must be host:port, e.g. 127.0.0.1:8787");
+
+    // Turnkey defaults so a fresh download needs no configuration.
+    const token_path = getEnv("SIGNER_APPROVAL_TOKEN_FILE") orelse resolveHome(gpa, default_token_file);
+    const key_file = getEnv("SIGNER_KEY_FILE") orelse resolveHome(gpa, default_key_file);
+    const relays_env = getEnv("SIGNER_RELAYS") orelse default_gui_relays;
+
+    var relays: std.ArrayList([]const u8) = .empty;
+    parseRelays(gpa, &relays, relays_env);
+    if (relays.items.len == 0) fail("SIGNER_RELAYS contained no relay URLs");
+
+    var startup = std.Io.Threaded.init(gpa, .{});
+    defer startup.deinit();
+    const io = startup.io();
+
+    // No key file yet → the GUI must create one; an encrypted file present →
+    // the GUI must unlock it.
+    const initial: onboarding.State = if (fileExists(io, key_file)) .locked else .uninitialized;
+
+    var broker_storage: approval.Broker = .{};
+    var gate = onboarding.Gate.init(gpa, std.Io.Dir.cwd(), key_file, initial);
+
+    // Honor a preconfigured key (dev SIGNER_SECRET_KEY, or an existing key file
+    // plus SIGNER_PASSPHRASE) so an operator can still bring their own; when none
+    // is configured — the turnkey case — the GUI onboards one over the API.
+    if (guiPreloadKey(gpa, io, key_file)) |kp| gate.preload(kp);
+    const booted = gate.current();
+
+    const token_hex = makeAndWriteToken(gpa, token_path);
+    var approval_server: approval_http.Server = .{
+        .gpa = gpa,
+        .broker = &broker_storage,
+        .gate = &gate,
+        .token = token_hex,
+        .info = .{ .relays = relays.items, .timeout_ms = broker_storage.timeout_ms },
+        .host = hp.host,
+        .port = hp.port,
+    };
+    const server_thread = std.Thread.spawn(.{}, runApprovalServer, .{&approval_server}) catch
+        fail("could not start the approval server");
+    server_thread.detach();
+
+    const key_note = switch (booted) {
+        .unlocked => "Key loaded from the environment; serving now.",
+        .locked => "Waiting for the GUI to unlock the key…",
+        .uninitialized => "Waiting for the GUI to set up the key…",
+    };
+    std.debug.print(
+        \\zig-nostr signer (GUI mode)
+        \\  approval API : http://{s}  (bearer token → {s})
+        \\  key file     : {s}
+        \\  key state    : {s}
+        \\
+        \\{s}
+        \\
+    , .{ addr, token_path, key_file, @tagName(booted), key_note });
+
+    // Block until the GUI creates or unlocks the key (returns at once if a
+    // preconfigured key was loaded above), then serve with it. The broker is
+    // already live, so approvals work the moment serving starts.
+    const secret_key = gate.waitUnlocked(io);
+    runRelays(gpa, relays.items, secret_key, conn_secret, policy_config, &broker_storage);
+}
+
+/// Derives the keypair, prints the connection banner, and serves every relay on
+/// its own thread until stopped. Each thread owns its secp256k1 context and
+/// bunker, so nothing mutable is shared between them; the only shared state is
+/// the read-only key material and the allocator. Never returns.
+fn runRelays(
+    gpa: std.mem.Allocator,
+    relays: []const []const u8,
+    secret_key: [32]u8,
+    conn_secret: ?[]const u8,
+    policy_config: *const policy.Config,
+    broker: ?*approval.Broker,
+) noreturn {
     var signer = keys.Signer.init();
     defer signer.deinit();
-
     const kp = signer.keyPairFromSecretKey(secret_key) catch
         fail("the configured key is not a valid secp256k1 secret key");
 
-    var relays: std.ArrayList([]const u8) = .empty;
-    defer relays.deinit(gpa);
-    var it = std.mem.splitScalar(u8, relays_env, ',');
-    while (it.next()) |raw| {
-        const url = std.mem.trim(u8, raw, " \t");
-        if (url.len != 0) try relays.append(gpa, url);
-    }
-    if (relays.items.len == 0) fail("SIGNER_RELAYS contained no relay URLs");
+    const token = nip46.buildBunkerUri(gpa, kp.public_key, relays, conn_secret) catch
+        fail("out of memory building the bunker token");
+    const pk_hex = hex.encode(gpa, &kp.public_key) catch fail("out of memory encoding the public key");
 
-    const token = try nip46.buildBunkerUri(gpa, kp.public_key, relays.items, conn_secret);
-    defer gpa.free(token);
-
-    const pk_hex = try hex.encode(gpa, &kp.public_key);
-    defer gpa.free(pk_hex);
-
-    // Interactive (GUI) mode: when SIGNER_APPROVAL_HTTP is set, stand up the
-    // loopback approval API and hand every relay thread a broker so requests are
-    // held for the GUI instead of auto-approved. The broker/server live in this
-    // frame (which never returns — the threads are joined below), so their
-    // addresses are stable for the lifetime of the process.
-    var broker_storage: approval.Broker = .{};
-    var approval_server: approval_http.Server = undefined;
-    const broker_ptr: ?*approval.Broker = if (getEnv("SIGNER_APPROVAL_HTTP")) |addr| blk: {
-        const token_path = getEnv("SIGNER_APPROVAL_TOKEN_FILE") orelse
-            fail("SIGNER_APPROVAL_HTTP requires SIGNER_APPROVAL_TOKEN_FILE (where to write the API token)");
-        const hp = parseHostPort(addr) orelse
-            fail("SIGNER_APPROVAL_HTTP must be host:port, e.g. 127.0.0.1:8787");
-        const token_hex = makeAndWriteToken(gpa, token_path);
-        approval_server = .{
-            .gpa = gpa,
-            .broker = &broker_storage,
-            .token = token_hex,
-            .info = .{ .pubkey_hex = pk_hex, .relays = relays.items, .timeout_ms = broker_storage.timeout_ms },
-            .host = hp.host,
-            .port = hp.port,
-        };
-        const server_thread = std.Thread.spawn(.{}, runApprovalServer, .{&approval_server}) catch
-            fail("could not start the approval server");
-        server_thread.detach();
-        std.debug.print("signer: approval API on http://{s} (bearer token written to {s})\n", .{ addr, token_path });
-        break :blk &broker_storage;
-    } else null;
-
-    const approval_note = if (broker_ptr != null)
+    const approval_note = if (broker != null)
         "held until you approve them in the connected GUI"
     else if (conn_secret == null)
         "auto-approved (no connection secret set)"
@@ -123,7 +190,7 @@ pub fn main() !void {
         "auto-approved behind the connection secret";
 
     std.debug.print(
-        \\zig-nostr signer (headless)
+        \\zig-nostr signer
         \\  pubkey : {s}
         \\  bunker : {s}
         \\
@@ -131,21 +198,70 @@ pub fn main() !void {
         \\{s}. Press Ctrl-C to stop.
         \\
     , .{ pk_hex, token, approval_note });
+    gpa.free(token);
+    gpa.free(pk_hex);
 
-    // Serve each relay on its own thread. Each thread owns its secp256k1
-    // context and bunker, so nothing mutable is shared between them; the only
-    // shared state is the read-only key material and the allocator.
     var threads: std.ArrayList(std.Thread) = .empty;
-    defer threads.deinit(gpa);
-    for (relays.items) |url| {
-        const t = std.Thread.spawn(.{}, serveRelayForever, .{ gpa, url, secret_key, conn_secret, &policy_config, broker_ptr }) catch |err| {
+    for (relays) |url| {
+        const t = std.Thread.spawn(.{}, serveRelayForever, .{ gpa, url, secret_key, conn_secret, policy_config, broker }) catch |err| {
             std.debug.print("signer: [{s}] could not start: {s}\n", .{ url, @errorName(err) });
             continue;
         };
-        try threads.append(gpa, t);
+        threads.append(gpa, t) catch fail("out of memory tracking relay threads");
     }
     if (threads.items.len == 0) fail("could not start any relay connections");
     for (threads.items) |t| t.join();
+    std.process.exit(0); // relay threads loop forever; reached only if all exit
+}
+
+/// Splits a comma-separated relay list into `list`, trimming and skipping empties.
+fn parseRelays(gpa: std.mem.Allocator, list: *std.ArrayList([]const u8), csv: []const u8) void {
+    var it = std.mem.splitScalar(u8, csv, ',');
+    while (it.next()) |raw| {
+        const url = std.mem.trim(u8, raw, " \t");
+        if (url.len != 0) list.append(gpa, url) catch fail("out of memory parsing SIGNER_RELAYS");
+    }
+}
+
+/// Resolves `$HOME/name`, or `name` alone if HOME is unset. The result is
+/// process-lived (the env string is, and an allocPrint uses the page allocator).
+fn resolveHome(gpa: std.mem.Allocator, name: []const u8) []const u8 {
+    if (getEnv("HOME")) |home| return std.fmt.allocPrint(gpa, "{s}/{s}", .{ home, name }) catch name;
+    return name;
+}
+
+/// Whether `path` exists (as a `Dir.cwd()` sub-path; an absolute path works too).
+fn fileExists(io: std.Io, path: []const u8) bool {
+    std.Io.Dir.cwd().access(io, path, .{}) catch return false;
+    return true;
+}
+
+/// In GUI mode, loads a key straight from the environment when one is fully
+/// specified — `SIGNER_SECRET_KEY` (dev), or an existing key file together with
+/// `SIGNER_PASSPHRASE` — so an operator can still preconfigure the key. Returns
+/// null (→ the GUI onboards the key) only when nothing is configured; a bad key
+/// or wrong passphrase still fails loudly rather than silently onboarding.
+fn guiPreloadKey(gpa: std.mem.Allocator, io: std.Io, key_file: []const u8) ?keys.KeyPair {
+    var signer = keys.Signer.init();
+    defer signer.deinit();
+
+    if (getEnv("SIGNER_SECRET_KEY")) |secret_hex| {
+        const sk = hex.decodeFixed(32, secret_hex) catch fail("SIGNER_SECRET_KEY must be exactly 64 hex characters");
+        return signer.keyPairFromSecretKey(sk) catch fail("SIGNER_SECRET_KEY is not a valid secp256k1 secret key");
+    }
+    if (getEnv("SIGNER_PASSPHRASE")) |passphrase| {
+        // Only unlock from the environment when the file is actually there;
+        // otherwise fall through so the GUI can create one.
+        if (fileExists(io, key_file)) {
+            const ncryptsec = keystore.readKeyFile(gpa, io, std.Io.Dir.cwd(), key_file) catch |err|
+                failFmt("could not read SIGNER_KEY_FILE '{s}': {s}", .{ key_file, @errorName(err) });
+            defer gpa.free(ncryptsec);
+            const sk = keystore.decryptKey(gpa, ncryptsec, passphrase) catch
+                fail("could not decrypt the key file (wrong SIGNER_PASSPHRASE?)");
+            return signer.keyPairFromSecretKey(sk) catch fail("the key file holds an invalid secret key");
+        }
+    }
+    return null;
 }
 
 /// Connects to `url` and serves requests forever, reconnecting after a short
@@ -397,6 +513,7 @@ test {
     _ = @import("policy.zig");
     _ = @import("approval.zig");
     _ = @import("approval_http.zig");
+    _ = @import("onboarding.zig");
 }
 
 test "derives the pubkey and builds a bunker token" {

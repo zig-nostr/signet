@@ -11,8 +11,9 @@ native clients over a relay — the secret key never reaches the client.
 > roadmap. The current build loads an encrypted (NIP-49) key from disk, connects
 > to your relays, and answers NIP-46 requests — `get_public_key`, `sign_event`,
 > `ping`, and NIP-44 encrypt/decrypt — behind the connection secret and an
-> optional method/event-kind allowlist. It can also run in **GUI mode**, holding
-> each request for interactive approval over a loopback API — the key never
+> optional method/event-kind allowlist. It can also run in **GUI mode**: it
+> holds each request for interactive approval over a loopback API, and can
+> create or unlock the key on first run from that same API — the key never
 > leaves the daemon. The native approval app itself is landing next.
 
 ## Build
@@ -81,20 +82,32 @@ daemon serves a small **loopback-only** HTTP API that a separate GUI connects
 to, so you approve or deny each request on screen. The key never leaves the
 daemon — the GUI only ever sees request metadata and sends back a yes/no.
 
+In GUI mode the daemon can also boot **without a key** and let the GUI set one
+up on first run, so a freshly downloaded app is turnkey. It reports its key
+state on `GET /info` (`uninitialized` → `locked` → `unlocked`); the GUI creates
+a key with `POST /setup` (generate a fresh one, or import an existing `nsec1…`
+or 64-char hex) or decrypts an existing key file with `POST /unlock`. The key is
+generated and decrypted inside the daemon — only the passphrase (and, on import,
+the secret you type) ever crosses the API, never a derived key.
+
 ```sh
-SIGNER_KEY_FILE="$HOME/.zig-nostr-signer.ncryptsec" \
-SIGNER_PASSPHRASE="a strong passphrase" \
-SIGNER_RELAYS="wss://relay.example.com" \
+# Turnkey: no key file and no passphrase on the command line — the GUI provides
+# them. SIGNER_KEY_FILE ($HOME/.zig-nostr-signer.key), SIGNER_APPROVAL_TOKEN_FILE
+# ($HOME/.zig-nostr-signer.token) and SIGNER_RELAYS all default in this mode, so
+# this alone is enough:
 SIGNER_APPROVAL_HTTP="127.0.0.1:8787" \
-SIGNER_APPROVAL_TOKEN_FILE="$HOME/.zig-nostr-signer.token" \
   zig build run
 ```
 
+You can still preconfigure the key instead of onboarding it — set
+`SIGNER_KEY_FILE` + `SIGNER_PASSPHRASE` (or the dev-only `SIGNER_SECRET_KEY`) and
+the daemon boots straight to `unlocked`.
+
 The API is bound to loopback and every request must carry the bearer token
-written (mode `0600`) to `SIGNER_APPROVAL_TOKEN_FILE`. Endpoints: `GET /pending`
-(long-poll), `POST /decision`, `GET /info`. A request left unanswered past the
-timeout is denied, and the allowlist still applies first — so disallowed
-requests are rejected without ever prompting.
+written (mode `0600`) to `SIGNER_APPROVAL_TOKEN_FILE`. Endpoints: `GET /info`,
+`POST /setup`, `POST /unlock`, `GET /pending` (long-poll), `POST /decision`. A
+request left unanswered past the timeout is denied, and the allowlist still
+applies first — so disallowed requests are rejected without ever prompting.
 
 ## Roadmap
 
@@ -103,6 +116,7 @@ requests are rejected without ever prompting.
 - [x] Encrypted key storage at rest (NIP-49 `ncryptsec`)
 - [x] Per-request approval policy (method + event-kind allowlists)
 - [x] Loopback approval API for interactive GUI approval
+- [x] First-run key onboarding over the approval API (generate / import / unlock)
 - [ ] Native macOS approval app + downloadable build
 
 ## License
