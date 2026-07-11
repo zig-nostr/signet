@@ -10,8 +10,8 @@ native clients over a relay — the secret key never reaches the client.
 > **Status: early / work in progress.** This is Showcase 1 of the zig-nostr
 > roadmap. The current build loads an encrypted (NIP-49) key from disk, connects
 > to your relays, and answers NIP-46 requests — `get_public_key`, `sign_event`,
-> `ping`, and NIP-44 encrypt/decrypt — auto-approving each one behind the
-> connection secret. A per-request approval UX is landing next.
+> `ping`, and NIP-44 encrypt/decrypt — behind the connection secret and an
+> optional method/event-kind allowlist. A native approval UI is landing later.
 
 ## Build
 
@@ -56,12 +56,27 @@ For quick local testing you can skip the key file and pass an unencrypted key
 directly with `SIGNER_SECRET_KEY=<64-char hex>` — but that keeps the key in your
 environment in the clear, so prefer the encrypted file otherwise.
 
+### Restricting what the signer will do
+
+By default the signer honors every NIP-46 request behind the connection secret.
+Two optional variables narrow that to least privilege:
+
+- `SIGNER_ALLOWED_METHODS` — comma-separated methods the signer will honor, e.g.
+  `get_public_key,sign_event`. `connect`, `ping`, and `logout` are always
+  allowed so the handshake can't be locked out. Use this to run a **sign-only**
+  bunker that refuses `nip44_decrypt`, so a connected client can't read your DMs
+  through it.
+- `SIGNER_ALLOWED_KINDS` — comma-separated event kinds `sign_event` may sign,
+  e.g. `1,7`. A request to sign any other kind is denied.
+
+Denied requests are answered with a NIP-46 error and logged.
+
 ## Roadmap
 
 - [x] `bunker://` connection token from a key + relays
 - [x] Relay listen/sign loop (answer NIP-46 requests over a relay)
 - [ ] Encrypted key storage at rest (NIP-49 `ncryptsec`)
-- [ ] Per-request approval policy
+- [x] Per-request approval policy (method + event-kind allowlists)
 - [ ] Native macOS app + downloadable build
 
 ## License

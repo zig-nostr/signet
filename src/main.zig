@@ -4,14 +4,15 @@
 //! clients over a relay. On startup it loads the key — decrypting an encrypted
 //! NIP-49 key file at rest (see `keystore.zig`), or an unencrypted dev key —
 //! prints the `bunker://` connection token, then connects to each configured
-//! relay and serves NIP-46 requests (see `serve.zig`) until stopped. A
-//! per-request approval UX is the next slice; this build auto-approves every
-//! request behind the connection secret.
+//! relay and serves NIP-46 requests (see `serve.zig`) until stopped. Requests
+//! are authorized by an optional method/event-kind allowlist (see `policy.zig`)
+//! behind the connection secret; a native approval UI comes later.
 
 const std = @import("std");
 const nostr = @import("nostr");
 const serve = @import("serve.zig");
 const keystore = @import("keystore.zig");
+const policy = @import("policy.zig");
 
 const keys = nostr.keys;
 const nip46 = nostr.nip46;
@@ -27,6 +28,10 @@ const usage =
     \\  SIGNER_SECRET_KEY      64-char hex secret key (unencrypted; dev use only)
     \\  SIGNER_RELAYS          comma-separated wss:// relay URLs (required to serve)
     \\  SIGNER_CONNECT_SECRET  optional connection secret clients must echo
+    \\  SIGNER_ALLOWED_METHODS comma-separated NIP-46 methods to honor (default: all;
+    \\                         connect/ping/logout are always allowed)
+    \\  SIGNER_ALLOWED_KINDS   comma-separated event kinds sign_event may sign
+    \\                         (default: any kind)
     \\  SIGNER_INIT            if set, create/import an encrypted key file and exit
     \\
     \\Provide the key either as an encrypted file (SIGNER_KEY_FILE +
@@ -49,6 +54,9 @@ pub fn main() !void {
     const relays_env = getEnv("SIGNER_RELAYS") orelse
         fail("set SIGNER_RELAYS to a comma-separated list of wss:// URLs");
     const conn_secret = getEnv("SIGNER_CONNECT_SECRET");
+
+    // Authorization rules, parsed once and shared read-only across relay threads.
+    const policy_config = buildPolicyConfig(gpa);
 
     // Load the secret key once (decrypting the at-rest key file if configured).
     // The deliberately-expensive scrypt KDF runs here and only here; the relay
@@ -93,7 +101,7 @@ pub fn main() !void {
     var threads: std.ArrayList(std.Thread) = .empty;
     defer threads.deinit(gpa);
     for (relays.items) |url| {
-        const t = std.Thread.spawn(.{}, serveRelayForever, .{ gpa, url, secret_key, conn_secret }) catch |err| {
+        const t = std.Thread.spawn(.{}, serveRelayForever, .{ gpa, url, secret_key, conn_secret, &policy_config }) catch |err| {
             std.debug.print("signer: [{s}] could not start: {s}\n", .{ url, @errorName(err) });
             continue;
         };
@@ -111,6 +119,7 @@ fn serveRelayForever(
     url: []const u8,
     secret_key: [32]u8,
     conn_secret: ?[]const u8,
+    policy_config: *const policy.Config,
 ) void {
     var threaded = std.Io.Threaded.init(gpa, .{});
     defer threaded.deinit();
@@ -123,7 +132,7 @@ fn serveRelayForever(
         return;
     };
 
-    var bunker = nip46.Bunker.initSingleKey(signer, kp, nip46.approveAll());
+    var bunker = nip46.Bunker.initSingleKey(signer, kp, policy_config.policy());
     bunker.secret = conn_secret;
 
     while (true) {
@@ -234,6 +243,46 @@ fn runInit(gpa: std.mem.Allocator) noreturn {
     std.process.exit(0);
 }
 
+/// Parses the authorization allowlists from the environment into a
+/// `policy.Config`. Empty/unset variables mean "no restriction"; an unknown
+/// method name or a non-numeric kind is a startup error. The returned slices
+/// live for the process (shared read-only by every relay thread).
+fn buildPolicyConfig(gpa: std.mem.Allocator) policy.Config {
+    var cfg = policy.Config{ .gpa = gpa };
+
+    if (getEnv("SIGNER_ALLOWED_METHODS")) |raw| {
+        var list: std.ArrayList(nip46.Method) = .empty;
+        var it = std.mem.splitScalar(u8, raw, ',');
+        while (it.next()) |item| {
+            const name = std.mem.trim(u8, item, " \t");
+            if (name.len == 0) continue;
+            const method = nip46.Method.fromString(name) orelse
+                failFmt("SIGNER_ALLOWED_METHODS: unknown method '{s}'", .{name});
+            list.append(gpa, method) catch fail("out of memory building the method allowlist");
+        }
+        if (list.items.len == 0) list.deinit(gpa) else {
+            cfg.allowed_methods = list.toOwnedSlice(gpa) catch fail("out of memory");
+        }
+    }
+
+    if (getEnv("SIGNER_ALLOWED_KINDS")) |raw| {
+        var list: std.ArrayList(u16) = .empty;
+        var it = std.mem.splitScalar(u8, raw, ',');
+        while (it.next()) |item| {
+            const s = std.mem.trim(u8, item, " \t");
+            if (s.len == 0) continue;
+            const kind = std.fmt.parseInt(u16, s, 10) catch
+                failFmt("SIGNER_ALLOWED_KINDS: invalid kind '{s}'", .{s});
+            list.append(gpa, kind) catch fail("out of memory building the kind allowlist");
+        }
+        if (list.items.len == 0) list.deinit(gpa) else {
+            cfg.allowed_kinds = list.toOwnedSlice(gpa) catch fail("out of memory");
+        }
+    }
+
+    return cfg;
+}
+
 fn getEnv(name: [*:0]const u8) ?[]const u8 {
     const value = std.c.getenv(name) orelse return null;
     return std.mem.span(value);
@@ -252,10 +301,11 @@ fn failFmt(comptime fmt: []const u8, args: anytype) noreturn {
 }
 
 test {
-    // Ensure the serve loop's and keystore's hermetic tests run under
-    // `zig build test`.
+    // Ensure the serve loop's, keystore's, and policy's hermetic tests run
+    // under `zig build test`.
     _ = @import("serve.zig");
     _ = @import("keystore.zig");
+    _ = @import("policy.zig");
 }
 
 test "derives the pubkey and builds a bunker token" {

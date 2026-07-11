@@ -92,10 +92,13 @@ fn handleRequest(
 
     const client_hex = try hex.encode(gpa, &request_event.pubkey);
     defer gpa.free(client_hex);
-    std.debug.print("signer: '{s}' from {s}…\n", .{ parsed.value.method, client_hex[0..16] });
 
     var response = try bunker.handle(gpa, io, parsed.value);
     defer response.deinit();
+
+    // Audit line: the request, the client, and the authorization outcome.
+    const outcome = if (response.value.err.len == 0) "ok" else response.value.err;
+    std.debug.print("signer: {s} '{s}' from {s}…\n", .{ outcome, parsed.value.method, client_hex[0..16] });
 
     const response_json = try response.value.toJson(gpa);
     defer gpa.free(response_json);
