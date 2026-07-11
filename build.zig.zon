@@ -1,0 +1,19 @@
+.{
+    .name = .signer,
+    .version = "0.0.0",
+    .fingerprint = 0xea6f6d92d62e08e5,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .nostr = .{
+            .url = "git+https://github.com/zig-nostr/nostr#b6f25744e47ed8d8b3e03256acb77eb01c0a54c2",
+            .hash = "nostr-0.2.1-CMyPzdK7BQD7xA9czN1OuADxSY5k6cKnR9n5fZ9LAMM2",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "LICENSE",
+        "README.md",
+    },
+}
