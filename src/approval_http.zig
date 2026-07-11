@@ -4,9 +4,16 @@
 //! Deliberately tiny (fixed routes, no keep-alive, no chunked encoding) to keep
 //! the key-holding daemon's attack surface small:
 //!
+//!   GET  /info              {"state":..,"pubkey":..,"relays":[..],"timeout_ms":N}
+//!   POST /setup             {"passphrase":..,"secret":..?} → create/import a key
+//!   POST /unlock            {"passphrase":..} → decrypt the key file
 //!   GET  /pending?since=N   long-poll (~1s) → {"version":N,"pending":[...]}
 //!   POST /decision          {"id":N,"decision":"approve"|"reject"} → {"ok":bool}
-//!   GET  /info              {"pubkey":"..","relays":[..],"timeout_ms":N}
+//!
+//! `/info` reports the key state (`uninitialized`/`locked`/`unlocked`); the GUI
+//! drives first-run key onboarding through `/setup` and `/unlock`. The key is
+//! created and decrypted in the daemon — only the passphrase (and, on import,
+//! the operator's chosen secret) crosses the API, never a derived key.
 //!
 //! Every request must carry `Authorization: Bearer <token>`; the token is
 //! generated at startup and written to a 0600 file only the same user can read.
@@ -14,13 +21,14 @@
 
 const std = @import("std");
 const approval = @import("approval.zig");
+const onboarding = @import("onboarding.zig");
 
 const net = std.Io.net;
 const Broker = approval.Broker;
 const Pending = approval.Pending;
+const Gate = onboarding.Gate;
 
 pub const Info = struct {
-    pubkey_hex: []const u8,
     relays: []const []const u8,
     timeout_ms: u64,
 };
@@ -28,6 +36,10 @@ pub const Info = struct {
 pub const Server = struct {
     gpa: std.mem.Allocator,
     broker: *Broker,
+    /// Key-onboarding gate: reports its state on /info and is driven by /setup
+    /// and /unlock. The key it guards is created/decrypted in the daemon and
+    /// never crosses this API.
+    gate: *Gate,
     /// Bearer token clients must present.
     token: []const u8,
     info: Info,
@@ -83,6 +95,9 @@ fn handleConn(self: *Server, io: std.Io, stream: net.Stream) !void {
     // filled the whole buffer or hit EOF — a deadlock when the client sends a
     // short request and then waits for our response).
     var buf: [8192]u8 = undefined;
+    // A /setup or /unlock body carries a passphrase (and maybe an nsec) in these
+    // stack buffers; wipe them before the frame unwinds.
+    defer std.crypto.secureZero(u8, &buf);
     var len: usize = 0;
     const head_end = while (true) {
         if (len >= buf.len) return respond(w, 431, "{\"error\":\"headers too large\"}");
@@ -111,6 +126,7 @@ fn handleConn(self: *Server, io: std.Io, stream: net.Stream) !void {
 
     // Assemble the body: bytes already read after the head, plus any remainder.
     var body_storage: [4096]u8 = undefined;
+    defer std.crypto.secureZero(u8, &body_storage);
     var body: []const u8 = "";
     if (content_length > 0) {
         if (content_length > body_storage.len) return respond(w, 413, "{\"error\":\"body too large\"}");
@@ -125,12 +141,16 @@ fn handleConn(self: *Server, io: std.Io, stream: net.Stream) !void {
         body = body_storage[0..got];
     }
 
+    if (eql(method, "GET") and eql(path, "/info"))
+        return handleInfo(self, w);
+    if (eql(method, "POST") and eql(path, "/setup"))
+        return handleSetup(self, io, w, body);
+    if (eql(method, "POST") and eql(path, "/unlock"))
+        return handleUnlock(self, io, w, body);
     if (eql(method, "GET") and std.mem.startsWith(u8, path, "/pending"))
         return handlePending(self, io, w, path);
     if (eql(method, "POST") and eql(path, "/decision"))
         return handleDecision(self, w, body);
-    if (eql(method, "GET") and eql(path, "/info"))
-        return handleInfo(self, w);
     return respond(w, 404, "{\"error\":\"not found\"}");
 }
 
@@ -183,9 +203,18 @@ fn handleDecision(self: *Server, w: *std.Io.Writer, body: []const u8) !void {
 }
 
 fn handleInfo(self: *Server, w: *std.Io.Writer) !void {
+    const state = self.gate.current();
+    const state_str = switch (state) {
+        .uninitialized => "uninitialized",
+        .locked => "locked",
+        .unlocked => "unlocked",
+    };
+    // The pubkey is known only once unlocked; report "" until then.
+    const pubkey = if (state == .unlocked) self.gate.pubkeyHex() else "";
+
     var json: std.ArrayList(u8) = .empty;
     defer json.deinit(self.gpa);
-    const head = try std.fmt.allocPrint(self.gpa, "{{\"pubkey\":\"{s}\",\"timeout_ms\":{d},\"relays\":[", .{ self.info.pubkey_hex, self.info.timeout_ms });
+    const head = try std.fmt.allocPrint(self.gpa, "{{\"state\":\"{s}\",\"pubkey\":\"{s}\",\"timeout_ms\":{d},\"relays\":[", .{ state_str, pubkey, self.info.timeout_ms });
     defer self.gpa.free(head);
     try json.appendSlice(self.gpa, head);
     for (self.info.relays, 0..) |relay, i| {
@@ -196,6 +225,46 @@ fn handleInfo(self: *Server, w: *std.Io.Writer) !void {
     }
     try json.appendSlice(self.gpa, "]}");
     return respond(w, 200, json.items);
+}
+
+/// POST /setup — first-run key creation. Body: `{"passphrase":..,"secret":..?}`.
+/// A non-empty `secret` (an `nsec1…` or 64-char hex) imports an existing key;
+/// absent/empty generates a fresh one. The key is created and encrypted in the
+/// daemon; only the derived public key is returned.
+fn handleSetup(self: *Server, io: std.Io, w: *std.Io.Writer, body: []const u8) !void {
+    const Body = struct { passphrase: []const u8 = "", secret: []const u8 = "" };
+    const parsed = std.json.parseFromSlice(Body, self.gpa, body, .{ .ignore_unknown_fields = true }) catch
+        return respond(w, 400, bad_request);
+    defer parsed.deinit();
+
+    self.gate.setup(io, parsed.value.passphrase, parsed.value.secret) catch |err| return switch (err) {
+        error.AlreadyInitialized => respond(w, 409, "{\"error\":\"already initialized\"}"),
+        error.EmptyPassphrase => respond(w, 400, "{\"error\":\"passphrase required\"}"),
+        error.InvalidSecretKey => respond(w, 400, "{\"error\":\"invalid secret key\"}"),
+        else => respond(w, 500, "{\"error\":\"could not create the key\"}"),
+    };
+    return respondPubkey(self, w);
+}
+
+/// POST /unlock — decrypt an existing key file. Body: `{"passphrase":".."}`.
+fn handleUnlock(self: *Server, io: std.Io, w: *std.Io.Writer, body: []const u8) !void {
+    const Body = struct { passphrase: []const u8 = "" };
+    const parsed = std.json.parseFromSlice(Body, self.gpa, body, .{ .ignore_unknown_fields = true }) catch
+        return respond(w, 400, bad_request);
+    defer parsed.deinit();
+
+    self.gate.unlock(io, parsed.value.passphrase) catch |err| return switch (err) {
+        error.BadPassphrase => respond(w, 401, "{\"error\":\"bad passphrase\"}"),
+        error.NotLocked => respond(w, 409, "{\"error\":\"not locked\"}"),
+        else => respond(w, 500, "{\"error\":\"could not unlock\"}"),
+    };
+    return respondPubkey(self, w);
+}
+
+fn respondPubkey(self: *Server, w: *std.Io.Writer) !void {
+    var out: [128]u8 = undefined;
+    const j = std.fmt.bufPrint(&out, "{{\"ok\":true,\"pubkey\":\"{s}\"}}", .{self.gate.pubkeyHex()}) catch unreachable;
+    return respond(w, 200, j);
 }
 
 // --- HTTP plumbing -------------------------------------------------------
@@ -216,8 +285,10 @@ fn reason(status: u16) []const u8 {
         400 => "Bad Request",
         401 => "Unauthorized",
         404 => "Not Found",
+        409 => "Conflict",
         413 => "Payload Too Large",
         431 => "Request Header Fields Too Large",
+        500 => "Internal Server Error",
         else => "Error",
     };
 }
