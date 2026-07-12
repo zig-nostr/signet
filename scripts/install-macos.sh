@@ -13,73 +13,90 @@
 #
 set -euo pipefail
 
-repo="zig-nostr/signet"
-app="Signet.app"
-
 say()  { printf '\033[1m==>\033[0m %s\n' "$1"; }
 die()  { printf '\033[1;31merror:\033[0m %s\n' "$1" >&2; exit 1; }
 
-# --- platform checks -------------------------------------------------------
-[ "$(uname -s)" = "Darwin" ] || die "Signet is a macOS app; this installer is macOS-only."
-[ "$(uname -m)" = "arm64" ] || die "Signet ships for Apple Silicon (arm64) only. On an Intel Mac, build from source: https://github.com/$repo#build"
+# All work happens inside main(), invoked on the very last line. That way bash
+# runs nothing until it has downloaded and parsed the whole script, so a
+# truncated `curl | bash` (a dropped connection mid-stream) can never execute a
+# half-read script — it just does nothing.
+main() {
+  local repo="zig-nostr/signet"
+  local app="Signet.app"
 
-for tool in curl shasum ditto xattr; do
-  command -v "$tool" >/dev/null 2>&1 || die "missing required tool: $tool"
-done
+  # --- platform checks -----------------------------------------------------
+  [ "$(uname -s)" = "Darwin" ] || die "Signet is a macOS app; this installer is macOS-only."
+  [ "$(uname -m)" = "arm64" ] || die "Signet ships for Apple Silicon (arm64) only. On an Intel Mac, build from source: https://github.com/$repo#build"
 
-# --- find the latest release asset -----------------------------------------
-say "Finding the latest Signet release…"
-api="https://api.github.com/repos/$repo/releases/latest"
-json="$(curl -fsSL "$api")" || die "could not reach the GitHub API."
+  local tool
+  for tool in curl shasum ditto xattr; do
+    command -v "$tool" >/dev/null 2>&1 || die "missing required tool: $tool"
+  done
 
-tag="$(printf '%s' "$json" | grep -o '"tag_name":[[:space:]]*"[^"]*"' | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
-url="$(printf '%s' "$json" | grep -o '"browser_download_url":[[:space:]]*"[^"]*macos\.zip"' | head -1 | sed -E 's/.*"(https[^"]+)".*/\1/')"
-digest="$(printf '%s' "$json" | grep -o 'sha256:[0-9a-f]\{64\}' | head -1 | cut -d: -f2)"
+  # --- find the latest release asset ---------------------------------------
+  say "Finding the latest Signet release…"
+  local api="https://api.github.com/repos/$repo/releases/latest"
+  local json
+  json="$(curl -fsSL "$api")" || die "could not reach the GitHub API."
 
-[ -n "$url" ] || die "no macOS build found on the latest release ($tag)."
-say "Latest release: ${tag:-unknown}"
+  local tag url digest
+  tag="$(printf '%s' "$json" | grep -o '"tag_name":[[:space:]]*"[^"]*"' | head -1 | sed -E 's/.*"([^"]+)".*/\1/')"
+  url="$(printf '%s' "$json" | grep -o '"browser_download_url":[[:space:]]*"[^"]*macos\.zip"' | head -1 | sed -E 's/.*"(https[^"]+)".*/\1/')"
+  digest="$(printf '%s' "$json" | grep -o 'sha256:[0-9a-f]\{64\}' | head -1 | cut -d: -f2)"
 
-# --- download + verify -----------------------------------------------------
-tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
-zip="$tmp/signet-macos.zip"
+  [ -n "$url" ] || die "no macOS build found on the latest release (${tag:-unknown})."
+  say "Latest release: ${tag:-unknown}"
 
-say "Downloading $(basename "$url")…"
-curl -fSL --progress-bar -o "$zip" "$url" || die "download failed."
+  # --- download + verify ---------------------------------------------------
+  local zip
+  # tmp is intentionally global (not local): the EXIT trap runs after main()
+  # returns, where a local would be out of scope. ${tmp:-} keeps set -u happy.
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "${tmp:-}"' EXIT
+  zip="$tmp/signet-macos.zip"
 
-if [ -n "$digest" ]; then
-  got="$(shasum -a 256 "$zip" | awk '{print $1}')"
-  [ "$got" = "$digest" ] || die "checksum mismatch (expected $digest, got $got). Aborting."
-  say "SHA-256 verified."
-else
-  say "No published checksum for this release; skipping verification."
-fi
+  say "Downloading $(basename "$url")…"
+  curl -fSL --progress-bar -o "$zip" "$url" || die "download failed."
 
-# --- unpack ----------------------------------------------------------------
-say "Unpacking…"
-ditto -x -k "$zip" "$tmp/unpack" || die "could not unzip the download."
-src="$tmp/unpack/$app"
-[ -d "$src" ] || die "the download did not contain $app."
+  if [ -n "$digest" ]; then
+    local got
+    got="$(shasum -a 256 "$zip" | awk '{print $1}')"
+    [ "$got" = "$digest" ] || die "checksum mismatch (expected $digest, got $got). Aborting."
+    say "SHA-256 verified."
+  else
+    say "No published checksum for this release; skipping verification."
+  fi
 
-# --- choose an install location we can actually write to -------------------
-if [ -w "/Applications" ] || { [ ! -e "/Applications/$app" ] && mkdir -p "/Applications" 2>/dev/null && [ -w "/Applications" ]; }; then
-  dest="/Applications"
-else
-  dest="$HOME/Applications"
-  mkdir -p "$dest"
-fi
+  # --- unpack --------------------------------------------------------------
+  say "Unpacking…"
+  ditto -x -k "$zip" "$tmp/unpack" || die "could not unzip the download."
+  local src="$tmp/unpack/$app"
+  [ -d "$src" ] || die "the download did not contain $app."
 
-# --- install (replace any existing copy) -----------------------------------
-if [ -e "$dest/$app" ]; then
-  say "Replacing the existing $app in $dest…"
-  # ${var:?} guards against ever expanding to "/" if a variable were empty.
-  rm -rf "${dest:?}/${app:?}" || die "could not remove the existing $dest/$app (is it running?)."
-fi
-ditto "$src" "$dest/$app" || die "could not install to $dest."
+  # --- choose an install location we can actually write to -----------------
+  local dest
+  if [ -w "/Applications" ] || { [ ! -e "/Applications/$app" ] && mkdir -p "/Applications" 2>/dev/null && [ -w "/Applications" ]; }; then
+    dest="/Applications"
+  else
+    dest="$HOME/Applications"
+    mkdir -p "$dest"
+  fi
+  [ -n "$dest" ] || die "could not determine an install location."
 
-# --- clear quarantine so it opens without a Gatekeeper detour ---------------
-xattr -dr com.apple.quarantine "$dest/$app" 2>/dev/null || true
+  # --- install (replace any existing copy) ---------------------------------
+  if [ -e "$dest/$app" ]; then
+    say "Replacing the existing $app in $dest…"
+    # ${var:?} guards against ever expanding to "/" if a variable were empty.
+    rm -rf "${dest:?}/${app:?}" || die "could not remove the existing $dest/$app (is it running?)."
+  fi
+  ditto "$src" "$dest/$app" || die "could not install to $dest."
 
-say "Installed $app to $dest."
-say "Opening Signet…"
-open "$dest/$app" || say "Open it from $dest/$app whenever you're ready."
+  # --- clear quarantine so it opens without a Gatekeeper detour -------------
+  xattr -dr com.apple.quarantine "$dest/$app" 2>/dev/null || true
+
+  say "Installed $app to $dest."
+  say "Opening Signet…"
+  open "$dest/$app" || say "Open it from $dest/$app whenever you're ready."
+}
+
+main "$@"
