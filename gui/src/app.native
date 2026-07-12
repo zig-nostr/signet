@@ -1,0 +1,14 @@
+<!-- Signer Approvals — the scaffold shell. The header and status bar frame
+     the window; the request queue fills the space between them once the
+     daemon wiring lands. Validate with: native check -->
+<column gap="0">
+  <row cross="center" padding="16">
+    <text grow="1" size="heading">Signer Approvals</text>
+  </row>
+  <separator/>
+  <column gap="12" main="center" cross="center" grow="1" padding="24">
+    <spinner/>
+    <text>{status}</text>
+  </column>
+  <status-bar>Not connected</status-bar>
+</column>

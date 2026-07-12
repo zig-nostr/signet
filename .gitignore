@@ -1,10 +1,11 @@
+# Build artifacts (match at any depth: daemon/, gui/)
 .zig-cache/
-zig-pkg/
 zig-out/
-*.o
-*.a
-*.so
-*.dylib
-*.dll
+zig-pkg/
+dist/
+
+# Native SDK / node
+node_modules/
+
+# macOS
 .DS_Store
-.claude/

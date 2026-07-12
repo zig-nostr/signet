@@ -6,13 +6,20 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
+  # The daemon (Zig): builds, tests, and format-checks on Linux and macOS.
   build-test-fmt:
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: daemon
     steps:
       - uses: actions/checkout@v4
 
@@ -32,3 +39,39 @@ jobs:
 
       - name: Check formatting
         run: zig fmt --check .
+
+  # The GUI (Native SDK): macOS only, via the native CLI.
+  gui:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: gui
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read Zig version
+        id: zig-version
+        run: echo "version=$(cat .zigversion)" >> "$GITHUB_OUTPUT"
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ steps.zig-version.outputs.version }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install the Native SDK CLI
+        run: npm install -g @native-sdk/cli@0.4.1
+
+      - name: Check markup and manifest
+        run: native check
+
+      - name: Test
+        run: native test
+
+      - name: Build
+        run: native build
+
+      - name: Check formatting
+        run: zig fmt --check src
