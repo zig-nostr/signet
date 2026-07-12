@@ -9,7 +9,7 @@ Built on [`zig-nostr/nostr`](https://github.com/zig-nostr/nostr).
 
 > **Status: early / work in progress.** The signer works end-to-end over public
 > relays, including those that require NIP-42 authentication. Downloads are
-> ad-hoc signed (not notarized) — see [Download](#download).
+> ad-hoc signed (not notarized) — see [Install](#install).
 
 ![Signet: first-run key setup, then approving a live signing request](gui/assets/demo.gif)
 
@@ -18,36 +18,23 @@ to copy into a client, live per-relay status, and approving a real NIP-46 signin
 request. The key is generated and held by the signer daemon — it never enters the
 GUI.</sub>
 
-## Download
+## Install
 
-Grab the latest **`Signet-<version>-macos.zip`** from the
-[**releases page**](https://github.com/zig-nostr/signet/releases/latest), unzip
-it, and move `Signet.app` to `/Applications`.
-
-Signet is **ad-hoc signed, not notarized** — on purpose. It holds your keys, so
-the trust anchor is a build you can read and reproduce, not an Apple signature:
-every release is built by CI from a tagged commit
-([`.github/workflows/release.yml`](.github/workflows/release.yml)), and you can
-reproduce it yourself with the [Build](#build) steps below. (Notarizing would
-mean routing each build through an Apple Developer account, which buys a WIP
-key-holder little over a build you verified yourself.)
-
-Because it isn't notarized, macOS quarantines the download and Gatekeeper blocks
-the first launch. Clear the quarantine flag once — this is the reliable step:
+**macOS (Apple Silicon):**
 
 ```sh
-xattr -dr com.apple.quarantine /Applications/Signet.app
-open /Applications/Signet.app
+curl -fsSL https://raw.githubusercontent.com/zig-nostr/signet/main/scripts/install-macos.sh | bash
 ```
 
-That only strips the "downloaded from the internet" marker; the app stays ad-hoc
-signed. (Finder's right-click → **Open**, or **System Settings → Privacy &
-Security → Open Anyway**, works on some setups too — but on recent macOS an
-ad-hoc app is often flagged *"is damaged"*, where only the command above clears
-it.)
+That downloads the latest release, verifies its SHA-256, installs `Signet.app`
+to `/Applications`, and opens it — ready to use.
 
-Prefer to trust nothing you didn't build? Skip the download and
-[build from source](#build).
+Signet is **ad-hoc signed, not notarized** — on purpose. It holds your keys, so
+the trust anchor is a build you can reproduce, not an Apple signature: every
+release is built by CI from a tagged commit
+([`.github/workflows/release.yml`](.github/workflows/release.yml)). Prefer to
+trust nothing you didn't run? Read the
+[installer](scripts/install-macos.sh) and [build from source](#build).
 
 ## Two components, one product
 
