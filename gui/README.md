@@ -1,6 +1,6 @@
-# signer-app
+# Signet — the GUI
 
-**Signer Approvals** — a native desktop app that approves or denies Nostr
+**Signet** — a native desktop app that approves or denies Nostr
 signing requests from your [signer daemon](../daemon).
 
 > **Status: early / work in progress.** This is the interactive front end for
@@ -10,7 +10,7 @@ signing requests from your [signer daemon](../daemon).
 > the daemon itself. `scripts/package-macos.sh` bundles both into a single
 > `.app`; a signed, notarized distributable is next.
 
-![Signer Approvals: first-run key setup, then approving a live signing request](assets/demo.gif)
+![Signet: first-run key setup, then approving a live signing request](assets/demo.gif)
 
 <sub>First-run key setup (create a new key, or import an existing `nsec`), then
 approving a live NIP-46 signing request from a connected client. The key is
@@ -104,8 +104,8 @@ in the daemon child.
 ## Packaging
 
 `scripts/package-macos.sh` produces a single, self-contained
-`Signer Approvals.app` with both executables side by side in `Contents/MacOS`
-(`signer-app` and `signer`), so one download brings up both:
+`Signet.app` with both executables side by side in `Contents/MacOS`
+(`signet` and `signer`), so one download brings up both:
 
 ```sh
 # builds the GUI, packages the .app, injects the daemon, and ad-hoc signs it
