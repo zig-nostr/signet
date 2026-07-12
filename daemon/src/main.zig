@@ -145,7 +145,7 @@ fn runGuiMode(gpa: std.mem.Allocator, addr: []const u8, conn_secret: ?[]const u8
         .broker = &broker_storage,
         .gate = &gate,
         .token = token_hex,
-        .info = .{ .relays = relays.items, .timeout_ms = broker_storage.timeout_ms },
+        .info = .{ .relays = relays.items, .timeout_ms = broker_storage.timeout_ms, .secret = conn_secret },
         .host = hp.host,
         .port = hp.port,
     };

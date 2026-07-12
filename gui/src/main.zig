@@ -39,7 +39,7 @@ const canvas_label = "main-canvas";
 const window_width: f32 = 460;
 const window_height: f32 = 560;
 
-const app_permissions = [_][]const u8{ native_sdk.security.permission_command, native_sdk.security.permission_view };
+const app_permissions = [_][]const u8{ native_sdk.security.permission_command, native_sdk.security.permission_view, native_sdk.security.permission_clipboard };
 const shell_views = [_]native_sdk.ShellView{
     .{ .label = canvas_label, .kind = .gpu_surface, .fill = true, .role = "Signet canvas", .accessibility_label = "Signet", .gpu_backend = .metal, .gpu_pixel_format = .bgra8_unorm, .gpu_present_mode = .timer, .gpu_alpha_mode = .@"opaque", .gpu_color_space = .srgb, .gpu_vsync = true },
 };
@@ -68,9 +68,11 @@ const info_key: u64 = 3;
 const pending_key: u64 = 4;
 const setup_key: u64 = 5;
 const unlock_key: u64 = 6;
+const clipboard_key: u64 = 7;
 const decision_key_base: u64 = 8;
 const decision_key_slots: u64 = 8;
 const retry_timer_key: u64 = 100;
+const copy_reset_timer_key: u64 = 101;
 
 fn decisionKey(id: u64) u64 {
     return decision_key_base + (id % decision_key_slots);
@@ -153,6 +155,14 @@ pub const Model = struct {
     pubkey_buf: [64]u8 = [_]u8{0} ** 64,
     pubkey_len: usize = 0,
     timeout_ms: u64 = 0,
+    /// The `bunker://` connection URI from `/info`, valid while serving. This is
+    /// the string the user pastes into a Nostr client to connect, so the serving
+    /// screen shows it with a Copy button. Sized for the pubkey + several relays.
+    bunker_buf: [1024]u8 = [_]u8{0} ** 1024,
+    bunker_len: usize = 0,
+    /// True briefly after the Copy button writes the URI to the clipboard, so the
+    /// button can confirm with "Copied!". Reset by a short one-shot timer.
+    copied: bool = false,
     /// Short human note for the `.daemon_exited` state, e.g. "signer exited
     /// (code 1)".
     exit_note_buf: [64]u8 = [_]u8{0} ** 64,
@@ -344,6 +354,36 @@ pub const Model = struct {
         self.pubkey_len = n;
     }
 
+    /// The full `bunker://` connection URI, shown on the serving screen.
+    pub fn bunker(self: *const Model) []const u8 {
+        return self.bunker_buf[0..self.bunker_len];
+    }
+    /// Show the connection card only while serving with a URI in hand.
+    pub fn show_bunker(self: *const Model) bool {
+        return self.phase == .connected and self.bunker_len > 0;
+    }
+    /// Copy-button label, confirming briefly after a successful copy.
+    pub fn copy_label(self: *const Model) []const u8 {
+        return if (self.copied) "Copied!" else "Copy";
+    }
+
+    /// Stores the `bunker://` URI from `/info`; a changed URI clears the stale
+    /// "Copied!" confirmation. An over-long URI (absurd relay count) is dropped
+    /// rather than truncated, so the shown string is always a valid URI.
+    fn setBunker(self: *Model, uri: []const u8) void {
+        if (uri.len > self.bunker_buf.len) {
+            self.clearBunker();
+            return;
+        }
+        if (!std.mem.eql(u8, uri, self.bunker())) self.copied = false;
+        @memcpy(self.bunker_buf[0..uri.len], uri);
+        self.bunker_len = uri.len;
+    }
+    fn clearBunker(self: *Model) void {
+        self.bunker_len = 0;
+        self.copied = false;
+    }
+
     fn setExitNote(self: *Model, exit: native_sdk.EffectExit) void {
         const s = switch (exit.reason) {
             .spawn_failed, .rejected => std.fmt.bufPrint(&self.exit_note_buf, "The signer failed to start — check SIGNER_BIN.", .{}),
@@ -409,6 +449,12 @@ pub const Msg = union(enum) {
     approve: u64,
     reject: u64,
     restart,
+
+    // Copy the bunker:// URI to the clipboard, its result, and the timer that
+    // clears the transient "Copied!" confirmation.
+    copy_bunker,
+    bunker_copied: native_sdk.EffectClipboardResult,
+    copy_reset: native_sdk.EffectTimer,
 
     // Onboarding (first-run key setup / unlock).
     passphrase_edit: canvas.TextInputEvent,
@@ -595,6 +641,7 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             model.setExitNote(exit);
             model.setAuth("");
             model.clearRows();
+            model.clearBunker(); // the connection URI is stale once the daemon is gone
             model.clearSecrets(); // don't keep a passphrase around a dead daemon
             model.clearOnboardError();
             model.submitting = false;
@@ -690,6 +737,30 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             attemptConnect(model, fx);
         },
 
+        .copy_bunker => {
+            const uri = model.bunker();
+            if (uri.len == 0) return;
+            fx.writeClipboard(.{
+                .key = clipboard_key,
+                .text = uri,
+                .on_result = Effects.clipboardMsg(.bunker_copied),
+            });
+        },
+        .bunker_copied => |result| {
+            if (result.outcome != .ok) return;
+            model.copied = true;
+            // Return the button to "Copy" shortly after confirming.
+            fx.startTimer(.{
+                .key = copy_reset_timer_key,
+                .interval_ms = 1_500,
+                .mode = .one_shot,
+                .on_fire = Effects.timerMsg(.copy_reset),
+            });
+        },
+        .copy_reset => |t| {
+            if (t.outcome == .fired) model.copied = false;
+        },
+
         // -- onboarding --
         .passphrase_edit => |e| model.passphrase_buf.apply(e),
         .secret_edit => |e| model.secret_buf.apply(e),
@@ -727,7 +798,9 @@ fn onOnboardResponse(model: *Model, fx: *Effects, r: native_sdk.EffectResponse, 
         model.clearOnboardError();
         model.version = 0; // a fresh serving session; poll the queue from the start
         model.phase = .connected;
-        pollPending(model, fx);
+        // Pull /info so we learn the bunker:// URI to show the user; its handler
+        // arms the pending-queue poll once it confirms the unlocked state.
+        fetchInfo(model, fx);
         return;
     }
     if (r.outcome == .ok) switch (r.status) {
@@ -744,15 +817,17 @@ fn onOnboardResponse(model: *Model, fx: *Effects, r: native_sdk.EffectResponse, 
 // -------------------------------------------------------- response parsing
 
 /// Fills `model` from a `GET /info` body:
-/// `{"state":..,"pubkey":..,"timeout_ms":..}`. `state` selects the screen
-/// (onboarding vs the queue); malformed input is ignored.
+/// `{"state":..,"pubkey":..,"bunker":..,"timeout_ms":..}`. `state` selects the
+/// screen (onboarding vs the queue); `bunker` is the connection URI shown while
+/// serving (empty until unlocked); malformed input is ignored.
 pub fn parseInfo(model: *Model, body: []const u8) void {
     var buf: [4096]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buf);
-    const Info = struct { state: []const u8 = "", pubkey: []const u8 = "", timeout_ms: u64 = 0 };
+    const Info = struct { state: []const u8 = "", pubkey: []const u8 = "", bunker: []const u8 = "", timeout_ms: u64 = 0 };
     const parsed = std.json.parseFromSliceLeaky(Info, fba.allocator(), body, .{ .ignore_unknown_fields = true }) catch return;
     model.setInfoState(parsed.state);
     model.setPubkey(parsed.pubkey);
+    model.setBunker(parsed.bunker);
     model.timeout_ms = parsed.timeout_ms;
 }
 

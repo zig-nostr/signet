@@ -10,6 +10,18 @@
     <text>signer {pubkey_short}</text>
   </column>
   <separator/>
+  <if test="{show_bunker}">
+    <column gap="6" padding="16">
+      <text foreground="text_muted">Bunker URL — paste into your Nostr client to connect</text>
+      <card padding="12">
+        <column gap="10">
+          <text wrap="true">{bunker}</text>
+          <button variant="secondary" on-press="copy_bunker">{copy_label}</button>
+        </column>
+      </card>
+    </column>
+    <separator/>
+  </if>
   <if test="{daemon_down}">
     <column gap="12" main="center" cross="center" grow="1" padding="24">
       <text>{exit_note}</text>

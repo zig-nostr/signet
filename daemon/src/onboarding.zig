@@ -52,6 +52,7 @@ pub const Gate = struct {
     // path only after it observes `.unlocked` (`.acquire`). Never leaves the
     // process.
     secret_key: [32]u8 = undefined,
+    pubkey_bytes: [32]u8 = undefined,
     pubkey_hex_buf: [64]u8 = undefined,
     pubkey_len: usize = 0,
 
@@ -71,6 +72,12 @@ pub const Gate = struct {
     /// The derived public key (hex), valid once `current() == .unlocked`.
     pub fn pubkeyHex(self: *const Gate) []const u8 {
         return self.pubkey_hex_buf[0..self.pubkey_len];
+    }
+
+    /// The derived public key (x-only bytes), valid once `current() == .unlocked`.
+    /// Used to build the `bunker://` connection URI reported on `/info`.
+    pub fn pubkey(self: *const Gate) [32]u8 {
+        return self.pubkey_bytes;
     }
 
     /// Creates the encrypted key file: imports `secret` (an `nsec1…` or 64-char
@@ -143,6 +150,7 @@ pub const Gate = struct {
 
     fn publish(self: *Gate, kp: keys.KeyPair) void {
         self.secret_key = kp.secret_key;
+        self.pubkey_bytes = kp.public_key;
         const h = hex.encode(self.gpa, &kp.public_key) catch "";
         defer if (h.len != 0) self.gpa.free(h);
         const n = @min(h.len, self.pubkey_hex_buf.len);

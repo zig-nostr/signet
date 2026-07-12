@@ -53,6 +53,39 @@ test "parseInfo fills the header fields" {
     try testing.expectEqual(@as(u64, 120000), m.timeout_ms);
 }
 
+test "parseInfo reads the bunker URI and show_bunker gates on serving" {
+    var m = Model{};
+    main.parseInfo(&m, "{\"state\":\"unlocked\",\"pubkey\":\"aabb\",\"bunker\":\"bunker://aabb?relay=wss%3A%2F%2Fr.example\",\"timeout_ms\":0}");
+    try testing.expectEqualStrings("bunker://aabb?relay=wss%3A%2F%2Fr.example", m.bunker());
+
+    // The connection card shows only while serving (phase == .connected).
+    try testing.expect(!m.show_bunker());
+    m.phase = .connected;
+    try testing.expect(m.show_bunker());
+
+    // A still-locked daemon reports no URI, so there is nothing to show or copy.
+    var locked = Model{};
+    locked.phase = .connected;
+    main.parseInfo(&locked, "{\"state\":\"locked\"}");
+    try testing.expectEqualStrings("", locked.bunker());
+    try testing.expect(!locked.show_bunker());
+}
+
+test "the copy confirmation resets only when the bunker URI changes" {
+    var m = Model{};
+    const same = "{\"state\":\"unlocked\",\"bunker\":\"bunker://aabb?relay=wss%3A%2F%2Fr.example\"}";
+    main.parseInfo(&m, same);
+
+    m.copied = true;
+    main.parseInfo(&m, same); // an unchanged URI keeps the "Copied!" confirmation
+    try testing.expect(m.copied);
+    try testing.expectEqualStrings("Copied!", m.copy_label());
+
+    main.parseInfo(&m, "{\"state\":\"unlocked\",\"bunker\":\"bunker://cccc?relay=wss%3A%2F%2Fr.example\"}");
+    try testing.expect(!m.copied); // a changed URI clears the stale confirmation
+    try testing.expectEqualStrings("Copy", m.copy_label());
+}
+
 test "parsePending loads the queue with kinds and formatted labels" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();

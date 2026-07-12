@@ -4,7 +4,7 @@
 //! Deliberately tiny (fixed routes, no keep-alive, no chunked encoding) to keep
 //! the key-holding daemon's attack surface small:
 //!
-//!   GET  /info              {"state":..,"pubkey":..,"relays":[..],"timeout_ms":N}
+//!   GET  /info              {"state":..,"pubkey":..,"bunker":..,"relays":[..],"timeout_ms":N}
 //!   POST /setup             {"passphrase":..,"secret":..?} → create/import a key
 //!   POST /unlock            {"passphrase":..} → decrypt the key file
 //!   GET  /pending?since=N   long-poll (~1s) → {"version":N,"pending":[...]}
@@ -20,10 +20,12 @@
 //! Bound to loopback only.
 
 const std = @import("std");
+const nostr = @import("nostr");
 const approval = @import("approval.zig");
 const onboarding = @import("onboarding.zig");
 
 const net = std.Io.net;
+const nip46 = nostr.nip46;
 const Broker = approval.Broker;
 const Pending = approval.Pending;
 const Gate = onboarding.Gate;
@@ -31,6 +33,9 @@ const Gate = onboarding.Gate;
 pub const Info = struct {
     relays: []const []const u8,
     timeout_ms: u64,
+    /// Optional connection secret clients must echo; folded into the `bunker://`
+    /// URI reported on `/info`. Null in the turnkey case.
+    secret: ?[]const u8 = null,
 };
 
 pub const Server = struct {
@@ -209,12 +214,23 @@ fn handleInfo(self: *Server, w: *std.Io.Writer) !void {
         .locked => "locked",
         .unlocked => "unlocked",
     };
-    // The pubkey is known only once unlocked; report "" until then.
+    // The pubkey and the bunker:// connection URI are known only once unlocked;
+    // report "" until then. The URI is the string a client needs to connect, so
+    // the GUI shows and copies it — building it here keeps the canonical NIP-46
+    // format (and the connection secret) in the daemon.
     const pubkey = if (state == .unlocked) self.gate.pubkeyHex() else "";
+    const bunker_uri: ?[]u8 = if (state == .unlocked)
+        nip46.buildBunkerUri(self.gpa, self.gate.pubkey(), self.info.relays, self.info.secret) catch null
+    else
+        null;
+    defer if (bunker_uri) |b| self.gpa.free(b);
+    const bunker = bunker_uri orelse "";
 
     var json: std.ArrayList(u8) = .empty;
     defer json.deinit(self.gpa);
-    const head = try std.fmt.allocPrint(self.gpa, "{{\"state\":\"{s}\",\"pubkey\":\"{s}\",\"timeout_ms\":{d},\"relays\":[", .{ state_str, pubkey, self.info.timeout_ms });
+    // Relay URLs and the bunker URI carry no JSON metacharacters (the URI
+    // percent-encodes relay params), so they are emitted without escaping.
+    const head = try std.fmt.allocPrint(self.gpa, "{{\"state\":\"{s}\",\"pubkey\":\"{s}\",\"bunker\":\"{s}\",\"timeout_ms\":{d},\"relays\":[", .{ state_str, pubkey, bunker, self.info.timeout_ms });
     defer self.gpa.free(head);
     try json.appendSlice(self.gpa, head);
     for (self.info.relays, 0..) |relay, i| {
@@ -348,4 +364,65 @@ test "parseSince reads the query parameter" {
     try testing.expectEqual(@as(u64, 0), parseSince("/pending"));
     try testing.expectEqual(@as(u64, 7), parseSince("/pending?since=7"));
     try testing.expectEqual(@as(u64, 3), parseSince("/pending?foo=1&since=3"));
+}
+
+test "GET /info reports the bunker URI once unlocked" {
+    const gpa = testing.allocator;
+
+    var signer = nostr.keys.Signer.init();
+    defer signer.deinit();
+    // BIP-340 test vector — the same key/pubkey the main.zig bunker-token test uses.
+    const secret = try nostr.hex.decodeFixed(32, "b7e151628aed2a6abf7158809cf4f3c762e7160f38b4da56a784d9045190cfef");
+    const kp = try signer.keyPairFromSecretKey(secret);
+
+    var gate = Gate.init(gpa, std.Io.Dir.cwd(), "unused.ncryptsec", .uninitialized);
+    gate.preload(kp); // marks unlocked and stores the pubkey; touches no key file
+
+    var broker: Broker = .{};
+    const relays = [_][]const u8{"wss://relay.example.com"};
+    var server = Server{
+        .gpa = gpa,
+        .broker = &broker,
+        .gate = &gate,
+        .token = "t",
+        .info = .{ .relays = &relays, .timeout_ms = 1000, .secret = "s3cret" },
+        .host = "127.0.0.1",
+        .port = 0,
+    };
+
+    var out = std.Io.Writer.Allocating.init(gpa);
+    defer out.deinit();
+    try handleInfo(&server, &out.writer);
+    var body = out.toArrayList();
+    defer body.deinit(gpa);
+
+    try testing.expect(std.mem.indexOf(u8, body.items, "\"state\":\"unlocked\"") != null);
+    try testing.expect(std.mem.indexOf(u8, body.items, "\"bunker\":\"bunker://dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659?") != null);
+    try testing.expect(std.mem.indexOf(u8, body.items, "secret=s3cret") != null);
+}
+
+test "GET /info omits the bunker URI until the key is unlocked" {
+    const gpa = testing.allocator;
+
+    var gate = Gate.init(gpa, std.Io.Dir.cwd(), "unused.ncryptsec", .uninitialized);
+    var broker: Broker = .{};
+    const relays = [_][]const u8{"wss://relay.example.com"};
+    var server = Server{
+        .gpa = gpa,
+        .broker = &broker,
+        .gate = &gate,
+        .token = "t",
+        .info = .{ .relays = &relays, .timeout_ms = 1000, .secret = null },
+        .host = "127.0.0.1",
+        .port = 0,
+    };
+
+    var out = std.Io.Writer.Allocating.init(gpa);
+    defer out.deinit();
+    try handleInfo(&server, &out.writer);
+    var body = out.toArrayList();
+    defer body.deinit(gpa);
+
+    try testing.expect(std.mem.indexOf(u8, body.items, "\"state\":\"uninitialized\"") != null);
+    try testing.expect(std.mem.indexOf(u8, body.items, "\"bunker\":\"\"") != null);
 }
