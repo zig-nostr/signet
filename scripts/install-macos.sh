@@ -1,13 +1,13 @@
 #!/bin/bash
 #
-# Signet — one-line macOS installer.
+# Signet - one-line macOS installer.
 #
 #   curl -fsSL https://raw.githubusercontent.com/zig-nostr/signet/main/scripts/install-macos.sh | bash
 #
 # Downloads the latest release, verifies its SHA-256, installs Signet.app to
 # /Applications (or ~/Applications), clears the download-quarantine flag so it
 # opens without a Gatekeeper detour, and launches it. Signet is ad-hoc signed
-# (not notarized) on purpose — it holds your keys, so the trust anchor is a build
+# (not notarized) on purpose - it holds your keys, so the trust anchor is a build
 # you can reproduce, not an Apple signature. Read this script and build from
 # source (https://github.com/zig-nostr/signet#build) if you'd rather.
 #
@@ -19,7 +19,7 @@ die()  { printf '\033[1;31merror:\033[0m %s\n' "$1" >&2; exit 1; }
 # All work happens inside main(), invoked on the very last line. That way bash
 # runs nothing until it has downloaded and parsed the whole script, so a
 # truncated `curl | bash` (a dropped connection mid-stream) can never execute a
-# half-read script — it just does nothing.
+# half-read script - it just does nothing.
 main() {
   local repo="zig-nostr/signet"
   local app="Signet.app"
@@ -34,7 +34,7 @@ main() {
   done
 
   # --- find the latest release asset ---------------------------------------
-  say "Finding the latest Signet release…"
+  say "Finding the latest Signet release..."
   local api="https://api.github.com/repos/$repo/releases/latest"
   local json
   json="$(curl -fsSL "$api")" || die "could not reach the GitHub API."
@@ -55,7 +55,7 @@ main() {
   trap 'rm -rf "${tmp:-}"' EXIT
   zip="$tmp/signet-macos.zip"
 
-  say "Downloading $(basename "$url")…"
+  say "Downloading $(basename "$url")..."
   curl -fSL --progress-bar -o "$zip" "$url" || die "download failed."
 
   if [ -n "$digest" ]; then
@@ -68,7 +68,7 @@ main() {
   fi
 
   # --- unpack --------------------------------------------------------------
-  say "Unpacking…"
+  say "Unpacking..."
   ditto -x -k "$zip" "$tmp/unpack" || die "could not unzip the download."
   local src="$tmp/unpack/$app"
   [ -d "$src" ] || die "the download did not contain $app."
@@ -85,7 +85,7 @@ main() {
 
   # --- install (replace any existing copy) ---------------------------------
   if [ -e "$dest/$app" ]; then
-    say "Replacing the existing $app in $dest…"
+    say "Replacing the existing ${app} in ${dest}..."
     # ${var:?} guards against ever expanding to "/" if a variable were empty.
     rm -rf "${dest:?}/${app:?}" || die "could not remove the existing $dest/$app (is it running?)."
   fi
@@ -95,7 +95,7 @@ main() {
   xattr -dr com.apple.quarantine "$dest/$app" 2>/dev/null || true
 
   say "Installed $app to $dest."
-  say "Opening Signet…"
+  say "Opening Signet..."
   open "$dest/$app" || say "Open it from $dest/$app whenever you're ready."
 }
 
