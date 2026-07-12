@@ -3,7 +3,7 @@
     .name = "signet",
     .display_name = "Signet",
     .description = "Signet — approve or deny Nostr signing requests; your key stays in the signer daemon.",
-    .version = "0.1.1",
+    .version = "0.2.0",
     .icons = .{"assets/icon.png"},
     .platforms = .{"macos"},
     .permissions = .{ "view", "command", "clipboard" },
