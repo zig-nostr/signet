@@ -9,7 +9,7 @@ signing requests from your [signer daemon](../daemon).
 > request and sends back your approve/deny decision — and spawns and supervises
 > the daemon itself. `scripts/package-macos.sh` bundles both into a single
 > `.app`, shipped as ad-hoc-signed macOS releases (not notarized — see the
-> top-level [Download](../README.md#download)).
+> top-level [Install](../README.md#install)).
 
 ![Signet: first-run key setup, then approving a live signing request](assets/demo.gif)
 
@@ -121,9 +121,9 @@ The daemon comes from the [`daemon/`](../daemon) package in this repo; build it
 Ad-hoc signing (the default) is what releases ship: the release workflow
 ([`.github/workflows/release.yml`](../.github/workflows/release.yml)) runs this
 on every version tag and attaches the zipped `.app`. Ad-hoc bundles aren't
-notarized, so macOS Gatekeeper quarantines the download — see
-[**Download**](../README.md#download) in the top-level README for the one-line
-`xattr` step to open it.
+notarized, so macOS quarantines the download; the
+[one-line installer](../README.md#install) clears that flag on install (or do it
+by hand with `xattr -dr com.apple.quarantine`).
 
 Notarizing is deliberately out of scope (a WIP key-holder gains little over a
 build you can reproduce yourself), but the Developer-ID path is still available
@@ -141,7 +141,7 @@ scripts/package-macos.sh --signing identity \
 - [x] Supervise the daemon as a child process (one launch, key stays isolated)
 - [x] Bundle the daemon into the app — one `.app`, discovered and supervised
 - [x] First-run key onboarding in-app (create / import / unlock)
-- [x] Ad-hoc signed macOS releases (CI on tag; open past Gatekeeper with one `xattr`)
+- [x] Ad-hoc signed macOS releases + one-line installer (CI on tag; clears quarantine on install)
 
 ## License
 
