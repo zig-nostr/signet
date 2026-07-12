@@ -1,7 +1,8 @@
 <!-- Signer Approvals — the live view. The header shows the connection state
-     and which key you are approving for; the body is the pending-request
-     queue (or an empty/status message); the status bar counts the queue.
-     Logic is in src/main.zig. Validate with: native check -->
+     and which key you are approving for; the body is one of three mutually
+     exclusive states (signer stopped / no requests / the request queue); the
+     status bar counts the queue. Logic is in src/main.zig. Validate with:
+     native check -->
 <column gap="0">
   <column gap="4" padding="16">
     <text size="heading">Signer Approvals</text>
@@ -9,12 +10,18 @@
     <text>signer {pubkey_short}</text>
   </column>
   <separator/>
-  <if test="{is_empty}">
+  <if test="{daemon_down}">
+    <column gap="12" main="center" cross="center" grow="1" padding="24">
+      <text>{exit_note}</text>
+      <button variant="primary" on-press="restart">Restart signer</button>
+    </column>
+  </if>
+  <if test="{show_empty}">
     <column gap="12" main="center" cross="center" grow="1" padding="24">
       <text>{empty_text}</text>
     </column>
   </if>
-  <else>
+  <if test="{show_queue}">
     <scroll grow="1">
       <column gap="8" padding="12">
         <for each="visible" key="id" as="r">
@@ -30,6 +37,6 @@
         </for>
       </column>
     </scroll>
-  </else>
+  </if>
   <status-bar>{count} pending</status-bar>
 </column>

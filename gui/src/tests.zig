@@ -153,3 +153,53 @@ test "a populated view renders rows and dispatches typed approve/deny" {
         else => return error.WrongMessage,
     }
 }
+
+// ------------------------------------------------------- supervision
+
+test "the phase and row count pick exactly one body state" {
+    var m = Model{};
+
+    m.phase = .connected;
+    try testing.expect(m.show_empty());
+    try testing.expect(!m.show_queue());
+    try testing.expect(!m.daemon_down());
+
+    m.rows_len = 1;
+    try testing.expect(!m.show_empty());
+    try testing.expect(m.show_queue());
+    try testing.expect(!m.daemon_down());
+
+    m.phase = .daemon_exited;
+    try testing.expect(m.daemon_down());
+    try testing.expect(!m.show_empty());
+    try testing.expect(!m.show_queue());
+}
+
+test "setAuth builds and clears the bearer header" {
+    var m = Model{};
+    try testing.expect(!m.hasToken());
+    m.setAuth("deadbeef");
+    try testing.expect(m.hasToken());
+    try testing.expectEqualStrings("Bearer deadbeef", m.auth());
+    m.setAuth("");
+    try testing.expect(!m.hasToken());
+    try testing.expectEqual(@as(usize, 0), m.auth().len);
+}
+
+test "the daemon-stopped view offers a restart" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+
+    var model = Model{};
+    model.phase = .daemon_exited; // as set when the daemon child exits
+    const tree = try buildTree(arena_state.allocator(), &model);
+
+    _ = try expectByText(tree.root, .text, "Signer stopped");
+    _ = try expectByText(tree.root, .text, "The signer process stopped.");
+
+    const restart = try expectByText(tree.root, .button, "Restart signer");
+    switch (tree.msgForPointer(restart.id, .up).?) {
+        .restart => {},
+        else => return error.WrongMessage,
+    }
+}
