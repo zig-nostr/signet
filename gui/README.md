@@ -4,10 +4,11 @@
 signing requests from your [signer daemon](../daemon).
 
 > **Status: early / work in progress.** This is the interactive front end for
-> the headless signer daemon. It connects to the daemon's loopback approval
-> API, shows each pending request, and sends back your approve/deny decision,
-> and spawns and supervises the daemon itself. `scripts/package-macos.sh`
-> bundles both into a single `.app`; a signed, notarized distributable is next.
+> the headless signer daemon. It walks you through first-run key setup (create
+> or import), unlocks the key on later launches, then shows each pending signing
+> request and sends back your approve/deny decision — and spawns and supervises
+> the daemon itself. `scripts/package-macos.sh` bundles both into a single
+> `.app`; a signed, notarized distributable is next.
 
 ## Architecture
 
@@ -59,6 +60,16 @@ The app polls the queue (a long-poll chain, so it updates within a second of
 a change), renders each pending request, and sends your decision back over
 `POST /decision`. The bearer token authenticates every call; the secret key
 stays in the daemon.
+
+### First-run key setup
+
+The first time it connects to a daemon that has no key yet, the app shows a
+**setup screen**: create a fresh key, or import an existing one (`nsec1…` or
+64-char hex), protected by a passphrase. On later launches the daemon comes up
+locked and the app shows an **unlock screen** for that passphrase. The key is
+generated and decrypted inside the daemon (over `POST /setup` and
+`POST /unlock`) — the app only ever sends the passphrase, and on import the
+secret you type, never a derived key.
 
 ### Managed mode (the app supervises the daemon)
 
@@ -114,8 +125,8 @@ scripts/package-macos.sh --signing identity \
 - [x] Approval queue over the daemon's loopback API (poll, approve, deny)
 - [x] Supervise the daemon as a child process (one launch, key stays isolated)
 - [x] Bundle the daemon into the app — one `.app`, discovered and supervised
+- [x] First-run key onboarding in-app (create / import / unlock)
 - [ ] Signed, notarized distributable (Developer ID)
-- [ ] First-run onboarding (generate/import a key) so a fresh download is turnkey
 
 ## License
 

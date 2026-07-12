@@ -66,6 +66,8 @@ const daemon_key: u64 = 1;
 const token_key: u64 = 2;
 const info_key: u64 = 3;
 const pending_key: u64 = 4;
+const setup_key: u64 = 5;
+const unlock_key: u64 = 6;
 const decision_key_base: u64 = 8;
 const decision_key_slots: u64 = 8;
 const retry_timer_key: u64 = 100;
@@ -121,7 +123,14 @@ pub const Phase = enum {
     unauthorized,
     /// Managed mode: the daemon child exited; awaiting a manual restart.
     daemon_exited,
+    /// The daemon has no key yet (`state:uninitialized`): first-run key setup.
+    needs_setup,
+    /// The daemon's key is encrypted (`state:locked`): enter the passphrase.
+    needs_unlock,
 };
+
+/// The daemon's key state, as reported by `GET /info`.
+pub const InfoState = enum { unknown, uninitialized, locked, unlocked };
 
 pub const max_pending = 32; // matches the daemon broker's capacity
 
@@ -154,6 +163,22 @@ pub const Model = struct {
     /// The daemon's queue version; sent back as `?since=` so a poll returns
     /// as soon as the queue changes.
     version: u64 = 0,
+
+    // -- onboarding (first-run key setup / unlock) --
+
+    /// The daemon's key state from the most recent `/info`.
+    info_state: InfoState = .unknown,
+    /// The passphrase, and (on import) the secret, typed on the setup/unlock
+    /// screens. They transit this process once to reach `/setup` or `/unlock`
+    /// and are cleared right after a successful send.
+    passphrase_buf: canvas.TextBuffer(128) = .{},
+    secret_buf: canvas.TextBuffer(200) = .{},
+    /// false: generate a fresh key; true: import an existing `nsec1…`/hex.
+    import_mode: bool = false,
+    /// A `/setup` or `/unlock` POST is in flight (disables the submit button).
+    submitting: bool = false,
+    onboard_error_buf: [96]u8 = [_]u8{0} ** 96,
+    onboard_error_len: usize = 0,
 
     // -- config accessors --
 
@@ -205,16 +230,65 @@ pub const Model = struct {
     pub fn count(self: *const Model) usize {
         return self.rows_len;
     }
-    /// Body states — exactly one is true, so the view renders three plain
-    /// `<if>` blocks instead of nested else chains.
+    /// Body states — exactly one is true, so the view renders plain `<if>`
+    /// blocks instead of nested else chains.
     pub fn daemon_down(self: *const Model) bool {
         return self.phase == .daemon_exited;
     }
+    pub fn needs_setup(self: *const Model) bool {
+        return self.phase == .needs_setup;
+    }
+    pub fn needs_unlock(self: *const Model) bool {
+        return self.phase == .needs_unlock;
+    }
+    /// The full-screen states (stopped / setup / unlock) that replace the queue.
+    fn onboarding_body(self: *const Model) bool {
+        return self.phase == .daemon_exited or self.phase == .needs_setup or self.phase == .needs_unlock;
+    }
     pub fn show_empty(self: *const Model) bool {
-        return self.phase != .daemon_exited and self.rows_len == 0;
+        return !self.onboarding_body() and self.rows_len == 0;
     }
     pub fn show_queue(self: *const Model) bool {
-        return self.phase != .daemon_exited and self.rows_len > 0;
+        return !self.onboarding_body() and self.rows_len > 0;
+    }
+
+    /// Footer text: the pending count while serving, nothing during onboarding.
+    pub fn footer(self: *const Model, arena: std.mem.Allocator) []const u8 {
+        if (self.onboarding_body()) return "";
+        return std.fmt.allocPrint(arena, "{d} pending", .{self.rows_len}) catch "";
+    }
+
+    // -- onboarding view bindings --
+
+    pub fn passphrase(self: *const Model) []const u8 {
+        return self.passphrase_buf.text();
+    }
+    pub fn secret(self: *const Model) []const u8 {
+        return self.secret_buf.text();
+    }
+    pub fn create_selected(self: *const Model) bool {
+        return !self.import_mode;
+    }
+    pub fn import_selected(self: *const Model) bool {
+        return self.import_mode;
+    }
+    pub fn onboard_error(self: *const Model) []const u8 {
+        return self.onboard_error_buf[0..self.onboard_error_len];
+    }
+    pub fn has_onboard_error(self: *const Model) bool {
+        return self.onboard_error_len > 0;
+    }
+    /// Disables the submit button while a request is in flight or the passphrase
+    /// is empty.
+    pub fn submit_disabled(self: *const Model) bool {
+        return self.submitting or self.passphrase_buf.isEmpty();
+    }
+    pub fn setup_label(self: *const Model) []const u8 {
+        if (self.submitting) return "Working…";
+        return if (self.import_mode) "Import key" else "Create key";
+    }
+    pub fn unlock_label(self: *const Model) []const u8 {
+        return if (self.submitting) "Unlocking…" else "Unlock";
     }
 
     /// Connection state line in the header.
@@ -226,10 +300,13 @@ pub const Model = struct {
             .disconnected => "Signer unreachable — retrying…",
             .unauthorized => "Unauthorized — check the token file",
             .daemon_exited => "Signer stopped",
+            .needs_setup => "First-run setup",
+            .needs_unlock => "Locked",
         };
     }
 
-    /// Message shown in the body while the queue is empty.
+    /// Message shown in the body while the queue is empty. (The onboarding
+    /// phases render their own screens, so their text here is never seen.)
     pub fn empty_text(self: *const Model) []const u8 {
         return switch (self.phase) {
             .connected => "No pending requests",
@@ -237,7 +314,7 @@ pub const Model = struct {
             .connecting => "Connecting to the signer…",
             .disconnected => "Signer unreachable — retrying…",
             .unauthorized => "Unauthorized — check the token file",
-            .daemon_exited => "Signer stopped",
+            .daemon_exited, .needs_setup, .needs_unlock => "",
         };
     }
 
@@ -273,6 +350,32 @@ pub const Model = struct {
         self.rows_len = 0;
     }
 
+    fn setInfoState(self: *Model, s: []const u8) void {
+        self.info_state = if (std.mem.eql(u8, s, "unlocked"))
+            .unlocked
+        else if (std.mem.eql(u8, s, "locked"))
+            .locked
+        else if (std.mem.eql(u8, s, "uninitialized"))
+            .uninitialized
+        else
+            .unknown;
+    }
+
+    fn setOnboardError(self: *Model, msg: []const u8) void {
+        const n = @min(msg.len, self.onboard_error_buf.len);
+        @memcpy(self.onboard_error_buf[0..n], msg[0..n]);
+        self.onboard_error_len = n;
+    }
+    fn clearOnboardError(self: *Model) void {
+        self.onboard_error_len = 0;
+    }
+    /// Wipes the passphrase and secret buffers (after a successful send, or when
+    /// the daemon goes away).
+    fn clearSecrets(self: *Model) void {
+        self.passphrase_buf.clear();
+        self.secret_buf.clear();
+    }
+
     pub fn removeRow(self: *Model, id: u64) void {
         var i: usize = 0;
         while (i < self.rows_len) : (i += 1) {
@@ -299,6 +402,16 @@ pub const Msg = union(enum) {
     approve: u64,
     reject: u64,
     restart,
+
+    // Onboarding (first-run key setup / unlock).
+    passphrase_edit: canvas.TextInputEvent,
+    secret_edit: canvas.TextInputEvent,
+    choose_create,
+    choose_import,
+    submit_setup,
+    submit_unlock,
+    setup_done: native_sdk.EffectResponse,
+    unlock_done: native_sdk.EffectResponse,
 };
 
 // ---------------------------------------------------------------- effects
@@ -333,11 +446,6 @@ fn attemptConnect(model: *Model, fx: *Effects) void {
         .path = model.tokenPath(),
         .on_result = Effects.fileMsg(.token_read),
     });
-}
-
-fn startPolling(model: *Model, fx: *Effects) void {
-    fetchInfo(model, fx);
-    pollPending(model, fx);
 }
 
 fn fetchInfo(model: *Model, fx: *Effects) void {
@@ -387,6 +495,53 @@ fn sendDecision(model: *Model, fx: *Effects, id: u64, approve: bool) void {
     });
 }
 
+/// POST /setup — create the key (generate, or import the entered secret) and,
+/// on success, start serving. The daemon's scrypt KDF makes this take a moment,
+/// so the timeout is generous. The body buffer is wiped after the send (fx.fetch
+/// copies it synchronously).
+fn sendSetup(model: *Model, fx: *Effects) void {
+    model.submitting = true;
+    model.clearOnboardError();
+    var url_buf: [128]u8 = undefined;
+    const url = std.fmt.bufPrint(&url_buf, "{s}/setup", .{model.baseUrl()}) catch return;
+    var body_buf: [768]u8 = undefined;
+    const Body = struct { passphrase: []const u8, secret: []const u8 };
+    const secret = if (model.import_mode) model.secret() else "";
+    const body = std.fmt.bufPrint(&body_buf, "{f}", .{std.json.fmt(Body{ .passphrase = model.passphrase(), .secret = secret }, .{})}) catch return;
+    const headers = [_]std.http.Header{
+        .{ .name = "authorization", .value = model.auth() },
+        .{ .name = "content-type", .value = "application/json" },
+    };
+    fx.fetch(.{ .key = setup_key, .method = .POST, .url = url, .headers = &headers, .body = body, .timeout_ms = 20_000, .on_response = Effects.responseMsg(.setup_done) });
+    std.crypto.secureZero(u8, &body_buf);
+}
+
+/// POST /unlock — decrypt the key file with the entered passphrase.
+fn sendUnlock(model: *Model, fx: *Effects) void {
+    model.submitting = true;
+    model.clearOnboardError();
+    var url_buf: [128]u8 = undefined;
+    const url = std.fmt.bufPrint(&url_buf, "{s}/unlock", .{model.baseUrl()}) catch return;
+    var body_buf: [256]u8 = undefined;
+    const Body = struct { passphrase: []const u8 };
+    const body = std.fmt.bufPrint(&body_buf, "{f}", .{std.json.fmt(Body{ .passphrase = model.passphrase() }, .{})}) catch return;
+    const headers = [_]std.http.Header{
+        .{ .name = "authorization", .value = model.auth() },
+        .{ .name = "content-type", .value = "application/json" },
+    };
+    fx.fetch(.{ .key = unlock_key, .method = .POST, .url = url, .headers = &headers, .body = body, .timeout_ms = 20_000, .on_response = Effects.responseMsg(.unlock_done) });
+    std.crypto.secureZero(u8, &body_buf);
+}
+
+/// Sets the pubkey from a `{"ok":true,"pubkey":".."}` setup/unlock response.
+fn applyPubkey(model: *Model, body: []const u8) void {
+    var buf: [512]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&buf);
+    const R = struct { pubkey: []const u8 = "" };
+    const parsed = std.json.parseFromSliceLeaky(R, fba.allocator(), body, .{ .ignore_unknown_fields = true }) catch return;
+    model.setPubkey(parsed.pubkey);
+}
+
 fn armRetry(fx: *Effects) void {
     fx.startTimer(.{
         .key = retry_timer_key,
@@ -431,6 +586,9 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             model.setExitNote(exit);
             model.setAuth("");
             model.clearRows();
+            model.clearSecrets(); // don't keep a passphrase around a dead daemon
+            model.clearOnboardError();
+            model.submitting = false;
         },
 
         .token_read => |r| switch (r.outcome) {
@@ -438,8 +596,10 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
                 const token = std.mem.trim(u8, r.bytes, " \t\r\n");
                 if (token.len > 0) {
                     model.setAuth(token);
+                    // Learn the key state from /info before doing anything else;
+                    // it decides between onboarding and the approvals queue.
                     if (model.phase != .connected) model.phase = .connecting;
-                    startPolling(model, fx);
+                    fetchInfo(model, fx);
                 } else {
                     armRetry(fx); // empty file — the daemon has not written it yet
                 }
@@ -448,13 +608,25 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             else => armRetry(fx),
         },
 
+        // /info reports the daemon's key state, which selects the screen.
         .info => |r| {
             if (r.outcome == .ok and r.status == 200) {
                 parseInfo(model, r.body);
+                switch (model.info_state) {
+                    // Serving (or an older daemon with no state field): the queue.
+                    .unlocked, .unknown => {
+                        model.phase = .connected;
+                        pollPending(model, fx);
+                    },
+                    .uninitialized => model.phase = .needs_setup,
+                    .locked => model.phase = .needs_unlock,
+                }
             } else if (r.outcome == .ok and r.status == 401) {
                 onUnauthorized(model, fx);
+            } else {
+                // The daemon may still be coming up; try again shortly.
+                armRetry(fx);
             }
-            // Otherwise best-effort: the /pending poll owns the phase.
         },
 
         .pending => |r| switch (r.outcome) {
@@ -502,21 +674,75 @@ pub fn update(model: *Model, msg: Msg, fx: *Effects) void {
             if (!model.managed) return;
             model.setAuth("");
             model.clearRows();
+            model.clearSecrets();
+            model.clearOnboardError();
+            model.submitting = false;
             spawnDaemon(model, fx);
             attemptConnect(model, fx);
         },
+
+        // -- onboarding --
+        .passphrase_edit => |e| model.passphrase_buf.apply(e),
+        .secret_edit => |e| model.secret_buf.apply(e),
+        .choose_create => {
+            model.import_mode = false;
+            model.clearOnboardError();
+        },
+        .choose_import => {
+            model.import_mode = true;
+            model.clearOnboardError();
+        },
+        .submit_setup => {
+            if (model.submitting or model.passphrase_buf.isEmpty()) return;
+            sendSetup(model, fx);
+        },
+        .submit_unlock => {
+            if (model.submitting or model.passphrase_buf.isEmpty()) return;
+            sendUnlock(model, fx);
+        },
+        .setup_done => |r| onOnboardResponse(model, fx, r, .setup),
+        .unlock_done => |r| onOnboardResponse(model, fx, r, .unlock),
+    }
+}
+
+const OnboardKind = enum { setup, unlock };
+
+/// Applies a `/setup` or `/unlock` response. On success the key is loaded and
+/// the daemon is serving, so clear the secrets and switch to the approvals
+/// queue; on failure keep what the user typed and show why.
+fn onOnboardResponse(model: *Model, fx: *Effects, r: native_sdk.EffectResponse, kind: OnboardKind) void {
+    model.submitting = false;
+    if (r.outcome == .ok and r.status == 200) {
+        applyPubkey(model, r.body);
+        model.clearSecrets();
+        model.clearOnboardError();
+        model.version = 0; // a fresh serving session; poll the queue from the start
+        model.phase = .connected;
+        pollPending(model, fx);
+        return;
+    }
+    if (r.outcome == .ok) switch (r.status) {
+        401 => model.setOnboardError("Wrong passphrase."),
+        400 => model.setOnboardError(if (kind == .setup) "Check the passphrase and key." else "Bad request."),
+        // Initialized/unlocked out from under us: re-sync from /info.
+        409 => fetchInfo(model, fx),
+        else => model.setOnboardError("The signer rejected the request."),
+    } else {
+        model.setOnboardError("Could not reach the signer.");
     }
 }
 
 // -------------------------------------------------------- response parsing
 
-/// Fills `model` from a `GET /info` body: `{"pubkey":..,"timeout_ms":..}`.
-/// Malformed input is ignored (the header simply stays as it was).
+/// Fills `model` from a `GET /info` body:
+/// `{"state":..,"pubkey":..,"timeout_ms":..}`. `state` selects the screen
+/// (onboarding vs the queue); malformed input is ignored.
 pub fn parseInfo(model: *Model, body: []const u8) void {
     var buf: [4096]u8 = undefined;
     var fba = std.heap.FixedBufferAllocator.init(&buf);
-    const Info = struct { pubkey: []const u8 = "", timeout_ms: u64 = 0 };
+    const Info = struct { state: []const u8 = "", pubkey: []const u8 = "", timeout_ms: u64 = 0 };
     const parsed = std.json.parseFromSliceLeaky(Info, fba.allocator(), body, .{ .ignore_unknown_fields = true }) catch return;
+    model.setInfoState(parsed.state);
     model.setPubkey(parsed.pubkey);
     model.timeout_ms = parsed.timeout_ms;
 }

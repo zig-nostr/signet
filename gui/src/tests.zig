@@ -215,3 +215,96 @@ test "the daemon-stopped view offers a restart" {
         else => return error.WrongMessage,
     }
 }
+
+// ------------------------------------------------------- onboarding
+
+test "parseInfo reads the daemon key state" {
+    var m = Model{};
+    main.parseInfo(&m, "{\"state\":\"uninitialized\",\"pubkey\":\"\",\"timeout_ms\":0}");
+    try testing.expectEqual(main.InfoState.uninitialized, m.info_state);
+
+    main.parseInfo(&m, "{\"state\":\"locked\"}");
+    try testing.expectEqual(main.InfoState.locked, m.info_state);
+
+    main.parseInfo(&m, "{\"state\":\"unlocked\",\"pubkey\":\"aabb\",\"timeout_ms\":120000}");
+    try testing.expectEqual(main.InfoState.unlocked, m.info_state);
+    try testing.expectEqualStrings("aabb", m.pubkey_buf[0..m.pubkey_len]);
+}
+
+test "the setup and unlock phases each select their own exclusive body" {
+    var m = Model{};
+
+    m.phase = .needs_setup;
+    try testing.expect(m.needs_setup());
+    try testing.expect(!m.needs_unlock());
+    try testing.expect(!m.daemon_down());
+    try testing.expect(!m.show_empty());
+    try testing.expect(!m.show_queue());
+
+    m.phase = .needs_unlock;
+    try testing.expect(m.needs_unlock());
+    try testing.expect(!m.needs_setup());
+    try testing.expect(!m.show_empty());
+    try testing.expect(!m.show_queue());
+}
+
+test "submit is disabled until a passphrase is typed, and while in flight" {
+    var m = Model{};
+    m.phase = .needs_unlock;
+    try testing.expect(m.submit_disabled()); // empty passphrase
+
+    m.passphrase_buf.apply(.{ .insert_text = "hunter2" });
+    try testing.expectEqualStrings("hunter2", m.passphrase());
+    try testing.expect(!m.submit_disabled());
+
+    m.submitting = true; // a request in flight re-disables it
+    try testing.expect(m.submit_disabled());
+}
+
+test "the setup screen renders create/import and dispatches submit_setup" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+
+    var model = Model{};
+    model.phase = .needs_setup;
+    model.passphrase_buf.apply(.{ .insert_text = "pw" }); // enables the submit button
+
+    const tree = try buildTree(arena_state.allocator(), &model);
+
+    _ = try expectByText(tree.root, .text, "Set up your signer");
+
+    const create = try expectByText(tree.root, .toggle_button, "Create new");
+    switch (tree.msgForPointer(create.id, .up).?) {
+        .choose_create => {},
+        else => return error.WrongMessage,
+    }
+    const import = try expectByText(tree.root, .toggle_button, "Import existing");
+    switch (tree.msgForPointer(import.id, .up).?) {
+        .choose_import => {},
+        else => return error.WrongMessage,
+    }
+    // The primary button submits setup; its label reflects create mode.
+    const submit = try expectByText(tree.root, .button, "Create key");
+    switch (tree.msgForPointer(submit.id, .up).?) {
+        .submit_setup => {},
+        else => return error.WrongMessage,
+    }
+}
+
+test "the unlock screen renders and dispatches submit_unlock" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+
+    var model = Model{};
+    model.phase = .needs_unlock;
+    model.passphrase_buf.apply(.{ .insert_text = "pw" });
+
+    const tree = try buildTree(arena_state.allocator(), &model);
+
+    _ = try expectByText(tree.root, .text, "Unlock your signer");
+    const submit = try expectByText(tree.root, .button, "Unlock");
+    switch (tree.msgForPointer(submit.id, .up).?) {
+        .submit_unlock => {},
+        else => return error.WrongMessage,
+    }
+}
