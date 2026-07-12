@@ -189,6 +189,13 @@ pub const Model = struct {
     pub fn baseUrl(self: *const Model) []const u8 {
         return self.base_url_buf[0..self.base_url_len];
     }
+    /// The bare `host:port` we poll — passed to the spawned daemon as
+    /// `--approval-http` so it serves the API there (a Finder-launched `.app`
+    /// carries no `SIGNER_APPROVAL_HTTP` env for the child to inherit).
+    pub fn approvalAddress(self: *const Model) []const u8 {
+        const url = self.baseUrl();
+        return if (std.mem.startsWith(u8, url, "http://")) url["http://".len..] else url;
+    }
     pub fn setTokenPath(self: *Model, path: []const u8) void {
         const n = @min(path.len, self.token_path_buf.len);
         @memcpy(self.token_path_buf[0..n], path[0..n]);
@@ -426,7 +433,7 @@ fn spawnDaemon(model: *Model, fx: *Effects) void {
     model.phase = .starting;
     fx.spawn(.{
         .key = daemon_key,
-        .argv = &.{model.daemonBin()},
+        .argv = &.{ model.daemonBin(), "--approval-http", model.approvalAddress() },
         .on_line = Effects.lineMsg(.daemon_line),
         .on_exit = Effects.exitMsg(.daemon_exited),
     });

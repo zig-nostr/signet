@@ -1,6 +1,6 @@
 .{
     .name = .signer,
-    .version = "0.1.0",
+    .version = "0.1.1",
     .fingerprint = 0xea6f6d92d62e08e5,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
