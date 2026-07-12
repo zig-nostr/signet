@@ -506,7 +506,9 @@ fn sendSetup(model: *Model, fx: *Effects) void {
     const url = std.fmt.bufPrint(&url_buf, "{s}/setup", .{model.baseUrl()}) catch return;
     var body_buf: [768]u8 = undefined;
     const Body = struct { passphrase: []const u8, secret: []const u8 };
-    const secret = if (model.import_mode) model.secret() else "";
+    // Trim whitespace so a stray space or newline (the key field is a wrapping
+    // textarea) can't corrupt a pasted nsec/hex secret.
+    const secret = if (model.import_mode) std.mem.trim(u8, model.secret(), " \t\r\n") else "";
     const body = std.fmt.bufPrint(&body_buf, "{f}", .{std.json.fmt(Body{ .passphrase = model.passphrase(), .secret = secret }, .{})}) catch return;
     const headers = [_]std.http.Header{
         .{ .name = "authorization", .value = model.auth() },
