@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
-# Package Signer Approvals as a single, self-contained macOS .app.
+# Package Signet as a single, self-contained macOS .app.
 #
 # The bundle carries two executables side by side in Contents/MacOS:
 #
-#   Signer Approvals.app/Contents/MacOS/signer-app   the GUI (CFBundleExecutable)
-#   Signer Approvals.app/Contents/MacOS/signer       the daemon it supervises
+#   Signet.app/Contents/MacOS/signet   the GUI (CFBundleExecutable)
+#   Signet.app/Contents/MacOS/signer       the daemon it supervises
 #
 # so one download brings up both: at launch the GUI discovers the `signer`
 # sitting beside it and spawns it (see bundledDaemonPath in src/main.zig). No
@@ -38,7 +38,7 @@ signer_bin="${SIGNER_BIN:-}"
 signing="adhoc"
 identity=""
 outdir="dist"
-app_name="Signer Approvals.app"
+app_name="Signet.app"
 
 usage() { sed -n '2,38p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
@@ -76,7 +76,7 @@ signer_bin="$(cd "$(dirname "$signer_bin")" && pwd)/$(basename "$signer_bin")"
 
 echo "==> building the GUI (native build, ReleaseFast)"
 native build
-gui_bin="$root/zig-out/bin/signer-app"
+gui_bin="$root/zig-out/bin/signet"
 [ -x "$gui_bin" ] || { echo "error: $gui_bin missing after native build" >&2; exit 1; }
 
 app="$outdir/$app_name"

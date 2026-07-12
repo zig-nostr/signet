@@ -1,4 +1,4 @@
-//! Signer Approvals — a native desktop approver for a zig-nostr signer.
+//! Signet — a native desktop approver for the signer daemon.
 //!
 //! Architecture: the signer daemon (the daemon/ package in this repo) holds the
 //! secret key and does all Nostr work; this app is a *separate process* that
@@ -41,11 +41,11 @@ const window_height: f32 = 560;
 
 const app_permissions = [_][]const u8{ native_sdk.security.permission_command, native_sdk.security.permission_view };
 const shell_views = [_]native_sdk.ShellView{
-    .{ .label = canvas_label, .kind = .gpu_surface, .fill = true, .role = "Approvals canvas", .accessibility_label = "Approvals", .gpu_backend = .metal, .gpu_pixel_format = .bgra8_unorm, .gpu_present_mode = .timer, .gpu_alpha_mode = .@"opaque", .gpu_color_space = .srgb, .gpu_vsync = true },
+    .{ .label = canvas_label, .kind = .gpu_surface, .fill = true, .role = "Signet canvas", .accessibility_label = "Signet", .gpu_backend = .metal, .gpu_pixel_format = .bgra8_unorm, .gpu_present_mode = .timer, .gpu_alpha_mode = .@"opaque", .gpu_color_space = .srgb, .gpu_vsync = true },
 };
 const shell_windows = [_]native_sdk.ShellWindow{.{
     .label = "main",
-    .title = "Signer Approvals",
+    .title = "Signet",
     .width = window_width,
     .height = window_height,
     .restore_state = false,
@@ -419,8 +419,8 @@ pub const Msg = union(enum) {
 pub const AppUi = canvas.Ui(Msg);
 pub const app_markup = @embedFile("app.native");
 
-const ApprovalsApp = native_sdk.UiApp(Model, Msg);
-const Effects = ApprovalsApp.Effects;
+const SignetApp = native_sdk.UiApp(Model, Msg);
+const Effects = SignetApp.Effects;
 
 fn spawnDaemon(model: *Model, fx: *Effects) void {
     model.phase = .starting;
@@ -838,8 +838,8 @@ fn loadConfig(model: *Model, io: std.Io, environ: *const std.process.Environ.Map
 }
 
 pub fn main(init: std.process.Init) !void {
-    const app_state = try ApprovalsApp.create(std.heap.page_allocator, .{
-        .name = "signer-app",
+    const app_state = try SignetApp.create(std.heap.page_allocator, .{
+        .name = "signet",
         .scene = shell_scene,
         .canvas_label = canvas_label,
         .init_fx = boot,
@@ -851,9 +851,9 @@ pub fn main(init: std.process.Init) !void {
     loadConfig(&app_state.model, init.io, init.environ_map);
 
     try runner.runWithOptions(app_state.app(), .{
-        .app_name = "signer-app",
-        .window_title = "Signer Approvals",
-        .bundle_id = "com.zig-nostr.signer-app",
+        .app_name = "signet",
+        .window_title = "Signet",
+        .bundle_id = "com.zig-nostr.signet",
         .icon_path = "assets/icon.png",
         .default_frame = geometry.RectF.init(0, 0, window_width, window_height),
         .restore_state = false,
