@@ -31,23 +31,22 @@ reproduce it yourself with the [Build](#build) steps below. (Notarizing would
 mean routing each build through an Apple Developer account, which buys a WIP
 key-holder little over a build you verified yourself.)
 
-Because it isn't notarized, macOS Gatekeeper blocks the first launch. To open it:
+Because it isn't notarized, macOS quarantines the download and Gatekeeper blocks
+the first launch. Clear the quarantine flag once — this is the reliable step:
 
-- **Finder (no Terminal):** Control-click (right-click) `Signet.app` → **Open**,
-  then **Open** in the dialog. On recent macOS, if that's still blocked, open
-  **System Settings → Privacy & Security**, scroll to *Security*, and click
-  **Open Anyway** next to the Signet message.
-- **If macOS says it "is damaged":** it isn't — that's the download-quarantine
-  flag on an ad-hoc-signed app, for which Apple withholds the one-click Finder
-  bypass. Clear the flag from Terminal instead:
-  ```sh
-  xattr -dr com.apple.quarantine /Applications/Signet.app
-  open /Applications/Signet.app
-  ```
+```sh
+xattr -dr com.apple.quarantine /Applications/Signet.app
+open /Applications/Signet.app
+```
 
-Either way you're only clearing the "downloaded from the internet" marker; the
-app stays ad-hoc signed. Prefer to trust nothing you didn't build? Skip the
-download and [build from source](#build).
+That only strips the "downloaded from the internet" marker; the app stays ad-hoc
+signed. (Finder's right-click → **Open**, or **System Settings → Privacy &
+Security → Open Anyway**, works on some setups too — but on recent macOS an
+ad-hoc app is often flagged *"is damaged"*, where only the command above clears
+it.)
+
+Prefer to trust nothing you didn't build? Skip the download and
+[build from source](#build).
 
 ## Two components, one product
 
