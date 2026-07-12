@@ -10,13 +10,16 @@
 //!
 //!  - **Attached** (default): the daemon is already running; the app connects
 //!    to its approval API at `SIGNER_APPROVAL_HTTP`.
-//!  - **Managed** (`SIGNER_BIN` set): the app *spawns and supervises* the
-//!    daemon binary as a child process — one launch brings up both. The child
-//!    inherits this process's environment (so it gets `SIGNER_KEY_FILE`,
-//!    `SIGNER_PASSPHRASE`, `SIGNER_RELAYS`, `SIGNER_APPROVAL_HTTP`,
-//!    `SIGNER_APPROVAL_TOKEN_FILE`), and the runtime kills it when the app
-//!    quits, so no daemon is orphaned holding the approval port. The key still
-//!    only ever lives in the daemon child.
+//!  - **Managed**: the app *spawns and supervises* the daemon binary as a child
+//!    process — one launch brings up both. The daemon is either a `signer`
+//!    bundled beside this executable (`…/Contents/MacOS/signer` in a packaged
+//!    app, so a single download is self-contained) or, taking precedence, an
+//!    explicit `SIGNER_BIN` override for development. The child inherits this
+//!    process's environment (so it gets `SIGNER_KEY_FILE`, `SIGNER_PASSPHRASE`,
+//!    `SIGNER_RELAYS`, `SIGNER_APPROVAL_HTTP`, `SIGNER_APPROVAL_TOKEN_FILE`),
+//!    and the runtime kills it when the app quits, so no daemon is orphaned
+//!    holding the approval port. The key still only ever lives in the daemon
+//!    child.
 //!
 //! The view lives in `app.native`; this file is the logic. All I/O is through
 //! the Native SDK effects channel (`fx.spawn` supervises the daemon, `fx.fetch`
@@ -553,17 +556,47 @@ pub fn initialModel() Model {
     return .{};
 }
 
-/// Resolves the daemon address, token-file path, and (optional) daemon binary
-/// from the environment. `SIGNER_APPROVAL_HTTP` defaults to 127.0.0.1:8787;
-/// the token-file path defaults to `$HOME/.zig-nostr-signer.token`; setting
-/// `SIGNER_BIN` switches on managed mode (the app supervises that binary). The
-/// token *contents* are read later through the effects channel, so a managed
-/// daemon that writes the file after we launch is picked up on retry.
-fn loadConfig(model: *Model, environ: *const std.process.Environ.Map) void {
+/// Which daemon binary to supervise, or null for attached mode (connect to a
+/// daemon someone else started). An explicit `SIGNER_BIN` always wins — it is
+/// the development / override path — otherwise a `signer` bundled beside this
+/// executable is used, so a downloaded app needs no configuration. `bundled`
+/// is expected to be null or non-empty (see `bundledDaemonPath`).
+pub fn chooseDaemonBin(env_bin: ?[]const u8, bundled: ?[]const u8) ?[]const u8 {
+    if (env_bin) |b| {
+        if (b.len > 0) return b;
+    }
+    return bundled;
+}
+
+/// Absolute path to a runnable `signer` sitting next to this executable — the
+/// layout a packaged app has (`…/Contents/MacOS/signer` beside the GUI binary),
+/// so a single download is self-contained. Returns null when there is no
+/// runnable sibling (e.g. under `native dev`, where the binary lives in the
+/// build cache with no daemon beside it), so the app falls back to attached
+/// mode. The path is written into `buf`.
+fn bundledDaemonPath(io: std.Io, buf: []u8) ?[]const u8 {
+    var dir_buf: [1024]u8 = undefined;
+    const dir_len = std.process.executableDirPath(io, &dir_buf) catch return null;
+    const path = std.fmt.bufPrint(buf, "{s}/signer", .{dir_buf[0..dir_len]}) catch return null;
+    // Only claim managed mode when the sibling is actually there and runnable;
+    // otherwise the spawn would fail at boot and mask the intended attached mode.
+    std.Io.Dir.accessAbsolute(io, path, .{ .execute = true }) catch return null;
+    return path;
+}
+
+/// Resolves the daemon address, token-file path, and (optional) daemon binary.
+/// `SIGNER_APPROVAL_HTTP` defaults to 127.0.0.1:8787; the token-file path
+/// defaults to `$HOME/.zig-nostr-signer.token`. Managed mode is switched on by
+/// a `signer` bundled beside the app, or an overriding `SIGNER_BIN`. The token
+/// *contents* are read later through the effects channel, so a managed daemon
+/// that writes the file after we launch is picked up on retry.
+fn loadConfig(model: *Model, io: std.Io, environ: *const std.process.Environ.Map) void {
     const address = environ.get("SIGNER_APPROVAL_HTTP") orelse default_address;
     model.setBaseUrl(address);
 
-    if (environ.get("SIGNER_BIN")) |bin| {
+    var bundled_buf: [1024]u8 = undefined;
+    const bundled = bundledDaemonPath(io, &bundled_buf);
+    if (chooseDaemonBin(environ.get("SIGNER_BIN"), bundled)) |bin| {
         model.setDaemonBin(bin);
         model.managed = true;
     }
@@ -589,7 +622,7 @@ pub fn main(init: std.process.Init) !void {
     });
     defer app_state.destroy();
     app_state.model = initialModel();
-    loadConfig(&app_state.model, init.environ_map);
+    loadConfig(&app_state.model, init.io, init.environ_map);
 
     try runner.runWithOptions(app_state.app(), .{
         .app_name = "signer-app",

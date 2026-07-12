@@ -156,6 +156,18 @@ test "a populated view renders rows and dispatches typed approve/deny" {
 
 // ------------------------------------------------------- supervision
 
+test "chooseDaemonBin prefers SIGNER_BIN, then a bundled sibling, else attached" {
+    // An explicit SIGNER_BIN overrides a bundled sibling (the dev path).
+    try testing.expectEqualStrings("/env/signer", main.chooseDaemonBin("/env/signer", "/bundle/signer").?);
+    // An empty SIGNER_BIN is treated as unset and falls through to the bundle.
+    try testing.expectEqualStrings("/bundle/signer", main.chooseDaemonBin("", "/bundle/signer").?);
+    // No override: the bundled sibling is supervised (the single-download path).
+    try testing.expectEqualStrings("/bundle/signer", main.chooseDaemonBin(null, "/bundle/signer").?);
+    // Neither present: attached mode (connect to a daemon someone else started).
+    try testing.expect(main.chooseDaemonBin(null, null) == null);
+    try testing.expect(main.chooseDaemonBin("", null) == null);
+}
+
 test "the phase and row count pick exactly one body state" {
     var m = Model{};
 
