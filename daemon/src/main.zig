@@ -55,7 +55,7 @@ const usage =
     \\
 ;
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     const gpa = std.heap.page_allocator;
 
     // `SIGNER_INIT` bootstraps an encrypted key file at rest, then exits.
@@ -66,12 +66,26 @@ pub fn main() !void {
     // Authorization rules, parsed once and shared read-only across relay threads.
     const policy_config = buildPolicyConfig(gpa);
 
-    // GUI mode: when SIGNER_APPROVAL_HTTP is set, the daemon may boot WITHOUT a
-    // key. It stands up the loopback approval API first (reporting its key
-    // state), lets the connected GUI create or unlock the key over /setup and
-    // /unlock, and only then serves. The key is created/decrypted in the daemon;
-    // the GUI never receives it. See onboarding.zig + approval_http.zig.
-    if (getEnv("SIGNER_APPROVAL_HTTP")) |addr| {
+    // GUI/managed mode: the daemon may boot WITHOUT a key. It stands up the
+    // loopback approval API first (reporting its key state), lets the connected
+    // GUI create or unlock the key over /setup and /unlock, and only then serves.
+    // The key is created/decrypted here; the GUI never receives it (see
+    // onboarding.zig + approval_http.zig). The approval address arrives as
+    // `--approval-http <addr>` — how the GUI passes it when it spawns us, since a
+    // Finder-launched app has no environment for the child to inherit — or via
+    // `SIGNER_APPROVAL_HTTP`. Parse argv here so the slice lives for the process
+    // (GUI/relay mode never returns).
+    var approval_addr = getEnv("SIGNER_APPROVAL_HTTP");
+    var args = std.process.Args.Iterator.init(init.minimal.args);
+    _ = args.skip(); // argv[0]
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--approval-http")) {
+            approval_addr = args.next();
+            break;
+        }
+    }
+
+    if (approval_addr) |addr| {
         runGuiMode(gpa, addr, conn_secret, &policy_config);
     }
 

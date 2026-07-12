@@ -31,18 +31,23 @@ reproduce it yourself with the [Build](#build) steps below. (Notarizing would
 mean routing each build through an Apple Developer account, which buys a WIP
 key-holder little over a build you verified yourself.)
 
-Because it isn't notarized, macOS Gatekeeper quarantines the download on first
-open (you'll see *"Signet.app is damaged and can't be opened"* — that's the
-quarantine flag, not actual damage). Clear it once, then open normally:
+Because it isn't notarized, macOS Gatekeeper blocks the first launch. To open it:
 
-```sh
-xattr -dr com.apple.quarantine /Applications/Signet.app
-open /Applications/Signet.app
-```
+- **Finder (no Terminal):** Control-click (right-click) `Signet.app` → **Open**,
+  then **Open** in the dialog. On recent macOS, if that's still blocked, open
+  **System Settings → Privacy & Security**, scroll to *Security*, and click
+  **Open Anyway** next to the Signet message.
+- **If macOS says it "is damaged":** it isn't — that's the download-quarantine
+  flag on an ad-hoc-signed app, for which Apple withholds the one-click Finder
+  bypass. Clear the flag from Terminal instead:
+  ```sh
+  xattr -dr com.apple.quarantine /Applications/Signet.app
+  open /Applications/Signet.app
+  ```
 
-Removing `com.apple.quarantine` only drops the "downloaded from the internet"
-marker; the app stays ad-hoc signed. Prefer to trust nothing you didn't build?
-Skip the download and [build from source](#build).
+Either way you're only clearing the "downloaded from the internet" marker; the
+app stays ad-hoc signed. Prefer to trust nothing you didn't build? Skip the
+download and [build from source](#build).
 
 ## Two components, one product
 
