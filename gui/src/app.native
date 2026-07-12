@@ -1,14 +1,35 @@
-<!-- Signer Approvals — the scaffold shell. The header and status bar frame
-     the window; the request queue fills the space between them once the
-     daemon wiring lands. Validate with: native check -->
+<!-- Signer Approvals — the live view. The header shows the connection state
+     and which key you are approving for; the body is the pending-request
+     queue (or an empty/status message); the status bar counts the queue.
+     Logic is in src/main.zig. Validate with: native check -->
 <column gap="0">
-  <row cross="center" padding="16">
-    <text grow="1" size="heading">Signer Approvals</text>
-  </row>
-  <separator/>
-  <column gap="12" main="center" cross="center" grow="1" padding="24">
-    <spinner/>
+  <column gap="4" padding="16">
+    <text size="heading">Signer Approvals</text>
     <text>{status}</text>
+    <text>signer {pubkey_short}</text>
   </column>
-  <status-bar>Not connected</status-bar>
+  <separator/>
+  <if test="{is_empty}">
+    <column gap="12" main="center" cross="center" grow="1" padding="24">
+      <text>{empty_text}</text>
+    </column>
+  </if>
+  <else>
+    <scroll grow="1">
+      <column gap="8" padding="12">
+        <for each="visible" key="id" as="r">
+          <card padding="12">
+            <column gap="10">
+              <text>{r.label}</text>
+              <row gap="8">
+                <button variant="primary" grow="1" on-press="approve:{r.id}">Approve</button>
+                <button variant="destructive" grow="1" on-press="reject:{r.id}">Deny</button>
+              </row>
+            </column>
+          </card>
+        </for>
+      </column>
+    </scroll>
+  </else>
+  <status-bar>{count} pending</status-bar>
 </column>

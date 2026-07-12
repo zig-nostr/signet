@@ -1,22 +1,21 @@
-# Signer Approvals — the Signet GUI
+# signer-app
 
-The native desktop approver for **Signet** — approve or deny Nostr signing
-requests. This is the `gui/` component of the
-[Signet](https://github.com/zig-nostr/signet) product; the secret key stays in
-the signer daemon ([`../daemon`](../daemon)).
+**Signer Approvals** — a native desktop app that approves or denies Nostr
+signing requests from your [signer daemon](../daemon).
 
 > **Status: early / work in progress.** This is the interactive front end for
-> the headless signer daemon. The scaffold opens the window and renders the
-> shell; wiring it to the daemon's loopback approval API — poll the queue,
-> approve or deny each request — lands next.
+> the headless signer daemon. It connects to the daemon's loopback approval
+> API, shows each pending request, and sends back your approve/deny decision.
+> Bundling it with the daemon as a single download lands next.
 
 ## Architecture
 
 The signer is split into two processes on purpose:
 
-- The **daemon** ([`../daemon`](../daemon)) holds the secret key, connects to
-  your relays, and does all Nostr work. In GUI mode it holds each request for
-  approval and serves a **loopback-only** HTTP API.
+- The **daemon** ([`daemon/`](../daemon))
+  holds the secret key, connects to your relays, and does all Nostr work. In
+  GUI mode it holds each request for approval and serves a **loopback-only**
+  HTTP API.
 - **This app** is a separate process that polls that API, shows each pending
   request, and sends back your approve/deny decision.
 
@@ -37,10 +36,33 @@ native build    # produce a binary in zig-out/bin/
 native check    # validate src/app.native + app.zon
 ```
 
+## Connect to a signer
+
+Run the daemon in **GUI mode** (see the signer's
+[interactive approval](../daemon)
+section) so it serves the loopback approval API, then point this app at it
+with two environment variables:
+
+- `SIGNER_APPROVAL_HTTP` — the daemon's approval address (default
+  `127.0.0.1:8787`).
+- `SIGNER_APPROVAL_TOKEN_FILE` — the bearer-token file the daemon wrote
+  (default `$HOME/.zig-nostr-signer.token`).
+
+```sh
+SIGNER_APPROVAL_HTTP=127.0.0.1:8787 \
+SIGNER_APPROVAL_TOKEN_FILE="$HOME/.zig-nostr-signer.token" \
+  native dev
+```
+
+The app polls the queue (a long-poll chain, so it updates within a second of
+a change), renders each pending request, and sends your decision back over
+`POST /decision`. The bearer token authenticates every call; the secret key
+stays in the daemon.
+
 ## Roadmap
 
 - [x] App scaffold (native window, shell view, logic tests)
-- [ ] Approval queue over the daemon's loopback API (poll, approve, deny)
+- [x] Approval queue over the daemon's loopback API (poll, approve, deny)
 - [ ] Supervise the daemon as a child process (one download, key stays isolated)
 - [ ] Packaged, signed, downloadable build
 
