@@ -19,7 +19,7 @@
 
 const std = @import("std");
 const nostr = @import("nostr");
-const policy = @import("policy.zig");
+const PolicyConfig = nostr.nip46.PolicyConfig;
 
 const nip46 = nostr.nip46;
 
@@ -147,7 +147,7 @@ pub const Broker = struct {
 /// carries that thread's `io`/allocator), constructed in `serveRelayForever`.
 pub const Interactive = struct {
     broker: *Broker,
-    config: *const policy.Config,
+    config: *const PolicyConfig,
     io: std.Io,
     gpa: std.mem.Allocator,
 
@@ -170,7 +170,7 @@ fn decide(ctx: ?*anyopaque, request: *const nip46.Request) nip46.Decision {
     info.created_at = std.Io.Timestamp.now(self.io, .real).toSeconds();
     if (nip46.Method.fromString(request.method)) |method| {
         if (method == .sign_event) {
-            if (policy.signEventKind(self.gpa, request)) |k| info.kind = k;
+            if (nostr.nip46.signEventKind(self.gpa, request)) |k| info.kind = k;
         }
     }
 
@@ -231,7 +231,7 @@ test "interactive policy denies allowlist-disallowed requests without prompting"
 
     var broker = Broker{};
     const allowed = [_]nip46.Method{.get_public_key}; // sign_event NOT allowed
-    var cfg = policy.Config{ .gpa = testing.allocator, .allowed_methods = &allowed };
+    var cfg = PolicyConfig{ .gpa = testing.allocator, .allowed_methods = &allowed };
     const inter = Interactive{ .broker = &broker, .config = &cfg, .io = io, .gpa = testing.allocator };
     const p = inter.asPolicy();
 
@@ -249,7 +249,7 @@ test "interactive policy escalates an allowed request and returns the GUI decisi
     const io = threaded.io();
 
     var broker = Broker{ .timeout_ms = 5_000 };
-    var cfg = policy.Config{ .gpa = testing.allocator }; // no restriction
+    var cfg = PolicyConfig{ .gpa = testing.allocator }; // no restriction
     const inter = Interactive{ .broker = &broker, .config = &cfg, .io = io, .gpa = testing.allocator };
     const p = inter.asPolicy();
 
