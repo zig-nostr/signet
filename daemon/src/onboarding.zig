@@ -15,7 +15,7 @@
 
 const std = @import("std");
 const nostr = @import("nostr");
-const keystore = @import("keystore.zig");
+const keystore = nostr.keystore;
 
 const keys = nostr.keys;
 const nip19 = nostr.nip19;

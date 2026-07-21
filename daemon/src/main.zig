@@ -2,17 +2,20 @@
 //!
 //! Keeps the user's secret key on a machine they control and signs for remote
 //! clients over a relay. On startup it loads the key — decrypting an encrypted
-//! NIP-49 key file at rest (see `keystore.zig`), or an unencrypted dev key —
+//! NIP-49 key file at rest (`nostr.keystore`), or an unencrypted dev key —
 //! prints the `bunker://` connection token, then connects to each configured
-//! relay and serves NIP-46 requests (see `serve.zig`) until stopped. Requests
-//! are authorized by an optional method/event-kind allowlist (see `policy.zig`)
-//! behind the connection secret; a native approval UI comes later.
+//! relay and serves NIP-46 requests (`nostr.signer.serve`) until stopped.
+//! Requests are authorized by an optional method/event-kind allowlist
+//! (`nostr.nip46.PolicyConfig`) behind the connection secret; a native approval
+//! UI comes later.
 
 const std = @import("std");
 const nostr = @import("nostr");
-const serve = @import("serve.zig");
-const keystore = @import("keystore.zig");
-const policy = @import("policy.zig");
+// The key-at-rest, the serve loop, and the authorization config now live in the
+// nostr library (a signer is a shell over it, not a fork). See `nostr.keystore`,
+// `nostr.signer`, and `nostr.nip46.PolicyConfig`.
+const keystore = nostr.keystore;
+const PolicyConfig = nostr.nip46.PolicyConfig;
 const approval = @import("approval.zig");
 const approval_http = @import("approval_http.zig");
 const onboarding = @import("onboarding.zig");
@@ -109,7 +112,7 @@ pub fn main(init: std.process.Init) !void {
 /// first-run key onboarding over it, then serve with the resulting key. The
 /// broker and server live in this frame, which never returns (it tail-calls the
 /// forever-serving `runRelays`), so their addresses are stable for the process.
-fn runGuiMode(gpa: std.mem.Allocator, addr: []const u8, conn_secret: ?[]const u8, policy_config: *const policy.Config) noreturn {
+fn runGuiMode(gpa: std.mem.Allocator, addr: []const u8, conn_secret: ?[]const u8, policy_config: *const PolicyConfig) noreturn {
     const hp = parseHostPort(addr) orelse
         fail("SIGNER_APPROVAL_HTTP must be host:port, e.g. 127.0.0.1:8787");
 
@@ -191,7 +194,7 @@ fn runRelays(
     relays: []const []const u8,
     secret_key: [32]u8,
     conn_secret: ?[]const u8,
-    policy_config: *const policy.Config,
+    policy_config: *const PolicyConfig,
     broker: ?*approval.Broker,
     relay_status: ?[]std.atomic.Value(u8),
 ) noreturn {
@@ -296,7 +299,7 @@ fn serveRelayForever(
     url: []const u8,
     secret_key: [32]u8,
     conn_secret: ?[]const u8,
-    policy_config: *const policy.Config,
+    policy_config: *const PolicyConfig,
     broker: ?*approval.Broker,
     status: ?*std.atomic.Value(u8),
 ) void {
@@ -350,7 +353,7 @@ fn serveOnce(
     defer relay.deinit();
     if (status) |s| s.store(@intFromEnum(approval_http.RelayStatus.connected), .monotonic);
     std.debug.print("signer: [{s}] connected; listening for NIP-46 requests\n", .{url});
-    try serve.serve(gpa, io, relay, bunker, remote, url);
+    try nostr.signer.serve(gpa, io, relay, bunker, remote, url);
 }
 
 /// Resolves the signer's 32-byte secret key from the environment, preferring
@@ -439,11 +442,11 @@ fn runInit(gpa: std.mem.Allocator) noreturn {
 }
 
 /// Parses the authorization allowlists from the environment into a
-/// `policy.Config`. Empty/unset variables mean "no restriction"; an unknown
+/// `PolicyConfig`. Empty/unset variables mean "no restriction"; an unknown
 /// method name or a non-numeric kind is a startup error. The returned slices
 /// live for the process (shared read-only by every relay thread).
-fn buildPolicyConfig(gpa: std.mem.Allocator) policy.Config {
-    var cfg = policy.Config{ .gpa = gpa };
+fn buildPolicyConfig(gpa: std.mem.Allocator) PolicyConfig {
+    var cfg = PolicyConfig{ .gpa = gpa };
 
     if (getEnv("SIGNER_ALLOWED_METHODS")) |raw| {
         var list: std.ArrayList(nip46.Method) = .empty;
@@ -535,11 +538,7 @@ fn failFmt(comptime fmt: []const u8, args: anytype) noreturn {
 }
 
 test {
-    // Ensure the serve loop's, keystore's, and policy's hermetic tests run
-    // under `zig build test`.
-    _ = @import("serve.zig");
-    _ = @import("keystore.zig");
-    _ = @import("policy.zig");
+    // The serve loop, keystore, and policy tests now run in the nostr library.
     _ = @import("approval.zig");
     _ = @import("approval_http.zig");
     _ = @import("onboarding.zig");
